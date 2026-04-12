@@ -1,0 +1,18 @@
+[Unit]
+Description=ClawOS Web Dashboard Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PROJECT_DIR__/backend
+ExecStartPre=/usr/bin/bash -lc 'for i in $(seq 1 10); do if ! ss -ltn "sport = :3001" | grep -q LISTEN; then exit 0; fi; sleep 1; done; echo "Port 3001 is still busy before start"; exit 1'
+ExecStart=/usr/bin/node dist/server.js
+Environment="PORT=3001"
+Environment="NODE_ENV=production"
+Restart=always
+RestartSec=3
+TimeoutStopSec=8
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ClawOS Watchdog every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*:0/10
+Persistent=true
+
+[Install]
+WantedBy=timers.target

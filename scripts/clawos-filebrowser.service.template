@@ -1,0 +1,15 @@
+[Unit]
+Description=ClawOS FileBrowser Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PROJECT_DIR__/filebrowser
+ExecStart=__PROJECT_DIR__/filebrowser/filebrowser -d ./filebrowser.db -a '127.0.0.1' -p 18790
+Restart=always
+RestartSec=3
+TimeoutStopSec=8
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

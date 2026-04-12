@@ -1,0 +1,6 @@
+[Unit]
+Description=ClawOS Service Watchdog
+
+[Service]
+Type=oneshot
+ExecStart=__PROJECT_DIR__/scripts/clawos-watchdog.sh

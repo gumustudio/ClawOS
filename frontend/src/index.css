@@ -1,0 +1,106 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --font-sans: "Inter", "system-ui", "-apple-system", "sans-serif";
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.tiptap h1,
+.tiptap h2,
+.tiptap h3 {
+  color: rgb(15 23 42);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.tiptap h1 {
+  font-size: 2rem;
+  margin: 1.5rem 0 1rem;
+}
+
+.tiptap h2 {
+  font-size: 1.5rem;
+  margin: 1.25rem 0 0.75rem;
+}
+
+.tiptap p {
+  color: rgb(51 65 85);
+  line-height: 1.9;
+  margin: 0.7rem 0;
+}
+
+.tiptap blockquote {
+  border-left: 4px solid rgb(253 186 116);
+  color: rgb(100 116 139);
+  margin: 1rem 0;
+  padding-left: 1rem;
+}
+
+.tiptap ul,
+.tiptap ol {
+  color: rgb(51 65 85);
+  padding-left: 1.5rem;
+}
+
+.tiptap ul[data-type='taskList'] {
+  list-style: none;
+  padding-left: 0;
+}
+
+.tiptap ul[data-type='taskList'] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin: 0.6rem 0;
+}
+
+.tiptap ul[data-type='taskList'] li > label {
+  margin-top: 0.2rem;
+}
+
+.tiptap ul[data-type='taskList'] li > div {
+  flex: 1;
+}
+
+.tiptap img {
+  display: block;
+  max-width: 100%;
+  border-radius: 1rem;
+  margin: 1rem 0;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+
+.tiptap table {
+  border-collapse: collapse;
+  margin: 1.25rem 0;
+  overflow: hidden;
+  width: 100%;
+  border-radius: 0.75rem;
+}
+
+.tiptap th,
+.tiptap td {
+  border: 1px solid rgb(226 232 240);
+  padding: 0.75rem 0.9rem;
+  vertical-align: top;
+}
+
+.tiptap th {
+  background: rgb(248 250 252);
+  font-weight: 700;
+}
+
+.tiptap .is-editor-empty:first-child::before {
+  color: rgb(148 163 184);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}

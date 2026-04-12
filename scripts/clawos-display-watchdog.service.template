@@ -1,0 +1,6 @@
+[Unit]
+Description=ClawOS Display Watchdog
+
+[Service]
+Type=oneshot
+ExecStart=__PROJECT_DIR__/scripts/clawos-display-watchdog.sh

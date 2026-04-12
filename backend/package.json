@@ -1,0 +1,42 @@
+{
+  "name": "backend",
+  "version": "1.29.11",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "tsx --test tests/**/*.test.ts",
+    "test:build": "tsc -p tsconfig.test.json",
+    "dev": "nodemon src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@types/http-proxy-middleware": "^0.19.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "express-basic-auth": "^1.2.1",
+    "http-proxy-middleware": "^3.0.5",
+    "music-metadata": "^11.12.3",
+    "NeteaseCloudMusicApi": "^4.30.0",
+    "node-cron": "^4.2.1",
+    "rss-parser": "^3.13.0",
+    "systeminformation": "^5.31.5",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.5.0",
+    "@types/node-cron": "^3.0.11",
+    "nodemon": "^3.1.14",
+    "supertest": "^7.1.4",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "^6.0.2"
+  }
+}

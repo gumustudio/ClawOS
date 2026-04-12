@@ -1,0 +1,14 @@
+version: '3.3'
+
+services:
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: clawos-filebrowser
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    ports:
+      - "8080:80"
+    volumes:
+      - ${HOME}:/srv
+      - ./filebrowser.db:/database/filebrowser.db
+      - ./settings.json:/config/settings.json

@@ -1,0 +1,12 @@
+[Unit]
+Description=ClawOS AList Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=__HOME__/.local/bin/alist server --data __HOME__/.clawos/alist
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

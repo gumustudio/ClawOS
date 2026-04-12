@@ -1,0 +1,51 @@
+.opencode/
+.DS_Store
+
+# Logs and temp runtime data
+logs/
+*.log
+tmp-notes-dir/
+
+# Dependencies and build output
+**/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+backend/dist/
+backend/dist-tests/
+
+# Local environment files
+**/.env
+**/.env.*
+**/*.local
+
+# AI config (contains API keys)
+config/ai-config.json
+
+# Local FileBrowser runtime artifacts
+filebrowser/filebrowser
+filebrowser/filebrowser.db
+filebrowser/*.tar.gz
+filebrowser/*.tar.gz.*
+
+# Secrets and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dev-only files (not for public repo)
+AGENTS.md
+CHANGELOG.md
+docs/
+
+# Temp fix/patch/update scripts
+fix*.py
+fix*.sh
+patch*.js
+patch*.py
+rewrite_*.py
+update_*.py
+
+# Backend temp test scripts
+backend/test-*.js
+backend/test_*.js

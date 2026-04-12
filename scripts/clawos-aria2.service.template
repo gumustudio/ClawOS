@@ -1,0 +1,12 @@
+[Unit]
+Description=ClawOS Aria2 Download Manager
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/aria2c --conf-path=%h/.aria2/aria2.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
