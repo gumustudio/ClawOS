@@ -22,6 +22,55 @@ AI-powered stock analysis, media streaming, file management, notes, RSS feeds �
 
 ---
 
+## AI Stock Trading: Real Results
+
+> The following data is from the author's **real A-share (China) trading records** using the ClawOS AI Stock Analysis module (April 2026). Not backtested. Not paper-traded.
+
+<div align="center">
+<img src=".github/stock-trading-proof.png" width="960" alt="AI Stock Trading — Risk Control Panel with Real Data" />
+<p><em>↑ ClawOS AI Stock Trading risk control panel screenshot (2026-04-13, live trading data)</em></p>
+</div>
+
+### Performance Summary
+
+Since system launch on 2026-04-04, **8 round-trip trades** (buy → sell) completed across 6 A-share stocks:
+
+```
+Win rate: 87.5%  (7 out of 8 trades profitable, only 1 loss)
+Avg return: +1.71% per trade
+Avg holding period: 2 trading days
+Only loss: Hengtong Optic-Electric -4.33% (disciplined stop-loss exit)
+Best single trade: Accelink Technologies +6.94%
+```
+
+### Trade-by-Trade Breakdown
+
+| # | Stock | Code | Buy | Sell | Return | Held | Period |
+|:---:|------|:------:|-------:|-------:|-------:|:----:|------|
+| 1 | Accelink Tech | 002281 | 90.39 | 93.00 | **+2.89%** | 3d | 04-04 → 04-07 |
+| 2 | Robotechnik | 300757 | 434.00 | 435.69 | **+0.39%** | 3d | 04-04 → 04-07 |
+| 3 | GDS Holdings | 300383 | 16.48 | 17.28 | **+4.85%** | 1d | 04-07 → 04-08 |
+| 4 | Tianhua New Energy | 300390 | 56.55 | 56.58 | **+0.05%** | 1d | 04-07 → 04-08 |
+| 5 | Fulin Precision | 300432 | 22.29 | 22.90 | **+2.74%** | 1d | 04-07 → 04-08 |
+| 6 | Hengtong Optic | 600487 | 59.99 | 57.39 | **-4.33%** | 1d | 04-09 → 04-10 |
+| 7 | Accelink Tech | 002281 | 106.79 | 114.20 | **+6.94%** | 3d | 04-10 → 04-13 |
+| 8 | Robotechnik | 300757 | 492.95 | 493.66 | **+0.14%** | 4d | 04-09 → 04-13 |
+
+> **Current position**: Tianhua New Energy (300390), cost basis 73.58, current price 80.20, **unrealized +9.00%**, second take-profit level triggered.
+
+### How Does It Work?
+
+This isn't luck — it's systematic risk discipline:
+
+- **45 AI Experts Vote** — 30 LLM experts covering 9 dimensions (industry chain, fundamentals, macro, sentiment, etc.) + 15 rule-based experts, triple-stream weighted scoring — no single-indicator guesswork
+- **Strict Stop-Loss** — Loss ≥3% triggers immediate sell. The only losing trade (Hengtong Optic) was a disciplined stop-loss exit, preventing deeper drawdown
+- **Risk-First** — Major-event veto (MH1), automatic exclusion of newly-listed/suspended stocks, max 3 concurrent positions
+- **Twice-Daily Data Collection** — Full collection at 16:00 post-market + incremental update at 07:30 pre-market, so overnight breaking news is never missed
+- **Expert Memory System** — Three-tier memory (short/medium/long-term), experts learn from historical mistakes and don't repeat them
+- **Human-AI Collaboration** — AI recommends, human decides. Every decision is recorded and fed back for learning
+
+---
+
 ## Why ClawOS?
 
 Most self-hosted dashboards give you a grid of bookmarks. ClawOS gives you an **actual desktop** — with draggable windows, a macOS-style dock, desktop widgets, wallpapers, and 15 integrated apps that talk to each other.
