@@ -45,6 +45,14 @@ export interface StockAnalysisStockSnapshot {
   sector: string
   latestPrice: number
   changePercent: number
+  /** 当日开盘价（旧数据可能缺失） */
+  open?: number
+  /** 当日最高价（旧数据可能缺失） */
+  high?: number
+  /** 当日最低价（旧数据可能缺失） */
+  low?: number
+  /** 昨日收盘价（旧数据可能缺失） */
+  previousClose?: number
   turnoverRate: number
   totalMarketCap: number
   circulatingMarketCap: number

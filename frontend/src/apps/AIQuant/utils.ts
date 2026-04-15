@@ -72,6 +72,11 @@ export function formatPercent(value: number) {
   return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 
+/** 安全格式化价格，兼容旧数据中可能缺失的字段 */
+export function formatPrice(value: number | undefined | null): string {
+  return value != null ? value.toFixed(2) : '--'
+}
+
 export function signalBadge(signal: SignalAction) {
   switch (signal) {
     case 'strong_buy': return 'bg-red-100 text-red-700'

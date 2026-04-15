@@ -684,7 +684,7 @@ function App() {
                     <div className="flex flex-col items-center justify-center h-full text-center space-y-4 animate-in fade-in duration-300 pt-8">
                       <img src={withBasePath("/favicon.svg")} className="w-20 h-20 mb-2 drop-shadow-md" />
                       <h2 className="text-3xl font-bold text-slate-800">ClawOS</h2>
-                       <p className="text-slate-500 font-mono text-sm bg-slate-100 px-2 py-0.5 rounded">v1.29.13</p>
+                       <p className="text-slate-500 font-mono text-sm bg-slate-100 px-2 py-0.5 rounded">v1.29.14</p>
                       <div className="h-px w-16 bg-slate-200 my-4" />
                       <div className="text-sm text-slate-600 space-y-2">
                         <p>构建日期：2026-04-12</p>

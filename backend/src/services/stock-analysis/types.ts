@@ -74,6 +74,10 @@ export interface StockAnalysisStockSnapshot {
   sector: string
   latestPrice: number
   changePercent: number
+  open: number
+  high: number
+  low: number
+  previousClose: number
   turnoverRate: number
   totalMarketCap: number
   circulatingMarketCap: number
