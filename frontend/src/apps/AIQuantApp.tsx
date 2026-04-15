@@ -1102,7 +1102,7 @@ export default function AIQuantApp() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className={`flex-1 p-6 ${activeTab === 'watchlist' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
           {loading ? <LoadingState /> : error ? <ErrorState error={error} onRetry={() => void loadOverview()} /> : overview ? (
             <>
               {aiRiskNotifications.length > 0 ? (

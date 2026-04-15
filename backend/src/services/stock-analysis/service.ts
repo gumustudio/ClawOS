@@ -945,7 +945,8 @@ async function fetchStockHistoryFromTonghuashun(code: string) {
     const points = rows.map<StockAnalysisKlinePoint | null>((row, index) => {
       const parts = row.split(',')
       if (parts.length < 7) return null
-      const [dateRaw, openStr, closeStr, highStr, lowStr, volumeStr, turnoverStr, amplitudeStr] = parts
+      // 同花顺字段顺序: date, open, high, low, close, volume, turnover, amplitude
+      const [dateRaw, openStr, highStr, lowStr, closeStr, volumeStr, turnoverStr, amplitudeStr] = parts
       const date = `${dateRaw.slice(0, 4)}-${dateRaw.slice(4, 6)}-${dateRaw.slice(6, 8)}`
       const openNumber = Number(openStr)
       const closeNumber = Number(closeStr)
@@ -956,7 +957,7 @@ async function fetchStockHistoryFromTonghuashun(code: string) {
       if (!date || !Number.isFinite(closeNumber)) return null
       const previousClose = index > 0 ? (() => {
         const prevParts = rows[index - 1].split(',')
-        return Number(prevParts[2])
+        return Number(prevParts[4]) // 同花顺 close 在 index 4
       })() : closeNumber
       const changeAmount = closeNumber - previousClose
       const changePercent = previousClose > 0 ? (changeAmount / previousClose) * 100 : 0
@@ -6212,7 +6213,7 @@ export async function getWatchlistWithQuotes(stockAnalysisDir: string): Promise<
 
     quotes[item.code] = {
       code: item.code,
-      name: spot?.name ?? item.name,
+      name: item.name || spot?.name || item.code, // 优先使用用户添加时的名称，避免腾讯源返回乱码
       latestPrice: spot?.latestPrice ?? 0,
       changePercent: spot?.changePercent ?? 0,
       open: spot?.open ?? 0,

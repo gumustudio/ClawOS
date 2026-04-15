@@ -118,7 +118,7 @@ function CandlestickChart({ data, width = 720, height = 420 }: CandlestickChartP
   }
 
   return (
-    <svg width="100%" viewBox={`0 0 ${width} ${height}`} className="overflow-visible">
+    <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" className="overflow-visible">
       {/* 价格区域 */}
       <g transform={`translate(${KLINE_PADDING.left}, ${KLINE_PADDING.top})`}>
         {/* 网格线 */}
@@ -150,10 +150,9 @@ function CandlestickChart({ data, width = 720, height = 420 }: CandlestickChartP
                 y={bodyTop}
                 width={candleWidth}
                 height={bodyH}
-                fill={isUp ? color : color}
+                fill={isUp ? '#fff' : color}
                 stroke={color}
-                strokeWidth={0.5}
-                opacity={isUp ? 0.3 : 1}
+                strokeWidth={isUp ? 1.5 : 0.5}
               />
               <title>{`${d.date}\n开:${d.open.toFixed(2)} 高:${d.high.toFixed(2)}\n低:${d.low.toFixed(2)} 收:${d.close.toFixed(2)}\n涨跌:${formatPercent(d.changePercent)}\n成交量:${formatVolume(d.volume)}`}</title>
             </g>
@@ -383,9 +382,9 @@ function DetailPanel({ item, quote, note, onNoteChange }: DetailPanelProps) {
       </div>
 
       {/* K 线图（占剩余空间） */}
-      <div className="flex-1 min-h-0 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-        <h4 className="font-semibold text-slate-700 text-sm mb-1">日 K 线</h4>
-        <div className="h-[calc(100%-24px)]">
+      <div className="flex-1 min-h-0 overflow-hidden rounded-xl border border-slate-100 bg-slate-50/70 p-3 flex flex-col">
+        <h4 className="font-semibold text-slate-700 text-sm mb-1 shrink-0">日 K 线</h4>
+        <div className="flex-1 min-h-0">
           <CandlestickChart data={quote.klineHistory} />
         </div>
       </div>
@@ -605,7 +604,7 @@ export function WatchlistTab() {
         </div>
 
         {/* 右栏：详情 + K 线图 */}
-        <div className="flex-1 min-h-0 min-w-0 rounded-2xl border border-slate-200/60 bg-white/70 shadow-sm p-5">
+        <div className="flex-1 min-h-0 min-w-0 overflow-hidden rounded-2xl border border-slate-200/60 bg-white/70 shadow-sm p-5">
           {selectedItem ? (
             <DetailPanel
               item={selectedItem}
