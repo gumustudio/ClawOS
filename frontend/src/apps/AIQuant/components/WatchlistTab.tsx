@@ -101,7 +101,6 @@ function CandlestickChart({ data, width = 720, height = 420 }: CandlestickChartP
   const gap = chartWidth / data.length
   const xCenter = (i: number) => i * gap + gap / 2
   const yPrice = (v: number) => priceHeight - ((v - priceMin) / (priceMax - priceMin)) * priceHeight
-  const yVolume = (v: number) => volumeHeight - (v / maxVolume) * volumeHeight
 
   // 价格网格线
   const priceGridCount = 4
