@@ -96,7 +96,7 @@ function ProviderEditor({
   onChange: (updated: ProviderFormData) => void
   onRemove: () => void
   testResults: Record<string, StockAnalysisModelTestResult>
-  onTest: (baseUrl: string, apiKey: string, modelId: string) => void
+  onTest: (providerId: string, baseUrl: string, apiKey: string, modelId: string) => void
   testing: boolean
 }) {
   const modelList = form.models.split(',').map((m) => m.trim()).filter(Boolean)
@@ -184,7 +184,7 @@ function ProviderEditor({
             return (
               <button
                 key={modelId}
-                onClick={() => onTest(form.baseUrl.trim(), form.apiKey.trim(), modelId)}
+                onClick={() => onTest(form.id, form.baseUrl.trim(), form.apiKey.trim(), modelId)}
                 disabled={testing}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors disabled:opacity-50 border-slate-200 bg-slate-50 text-slate-600 hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-600"
               >
@@ -479,17 +479,17 @@ export function AIConfigTab() {
     }
   }
 
-  async function handleTestModel(baseUrl: string, apiKey: string, modelId: string) {
+  async function handleTestModel(providerId: string, baseUrl: string, apiKey: string, modelId: string) {
     setTesting(true)
     try {
       const result = await testModelConnectivity(baseUrl, apiKey, modelId)
-      setTestResults((prev) => ({ ...prev, [`${result.providerId}:${modelId}`]: result }))
+      setTestResults((prev) => ({ ...prev, [`${providerId}:${modelId}`]: result }))
     } catch (err) {
       // 如果请求失败，构造本地失败结果
       setTestResults((prev) => ({
         ...prev,
-        [`test:${modelId}`]: {
-          providerId: 'test',
+        [`${providerId}:${modelId}`]: {
+          providerId,
           modelId,
           success: false,
           latencyMs: 0,
