@@ -11,6 +11,7 @@ import {
   runMorningSupplementAnalysis,
   runStockAnalysisDaily,
   runStockAnalysisPostMarket,
+  runAutoDecisions,
   startIntradayMonitor,
   stopIntradayMonitor,
 } from './service'
@@ -127,6 +128,37 @@ export function initStockAnalysisScheduler() {
         const msg = (error as Error).message
         saLog.error('scheduler', `cron:daily 盘前每日分析失败 错误=${msg}`)
         logger.error(`AI 炒股盘前刷新失败: ${msg}`, { module: 'StockAnalysis' })
+      })
+  }, CRON_OPTIONS)
+
+  // 开盘后 09:31 周一到周五 — 一键自动执行（强烈买入自动开仓 + 买入/观望自动忽略）
+  // v1.30.1：自动触发版本。依赖 08:05 每日分析已经完成
+  // 与手动按钮共用 runAutoDecisions()，同一天重复触发是安全的：已处理过的信号会被 decisionSource !== 'system' 守卫跳过
+  cron.schedule('31 9 * * 1-5', () => {
+    if (!isTradingDay()) {
+      logger.info('今日非交易日，跳过自动执行', { module: 'StockAnalysis' })
+      return
+    }
+    if (hasCronCompletedToday('autoExecute')) {
+      logger.info('[M8] 今日自动执行已完成，跳过重复触发', { module: 'StockAnalysis' })
+      return
+    }
+    void getStockAnalysisDir()
+      .then((dir) => {
+        saLog.info('scheduler', 'cron:autoExecute 开盘自动执行开始')
+        return runAutoDecisions(dir)
+      })
+      .then((result) => {
+        markCronCompletedToday('autoExecute')
+        saLog.info(
+          'scheduler',
+          `cron:autoExecute 完成 tradeDate=${result.tradeDate} bought=${result.autoBoughtCount} ignored=${result.autoIgnoredCount} skipped=${result.skippedCount}`,
+        )
+      })
+      .catch((error) => {
+        const msg = (error as Error).message
+        saLog.error('scheduler', `cron:autoExecute 开盘自动执行失败 错误=${msg}`)
+        logger.error(`AI 炒股开盘自动执行失败: ${msg}`, { module: 'StockAnalysis' })
       })
   }, CRON_OPTIONS)
 
