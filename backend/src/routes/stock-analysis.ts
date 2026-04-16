@@ -519,9 +519,23 @@ router.put('/ai-config/experts/:id/system-prompt', async (req, res) => {
 
 router.post('/ai-config/test-model', async (req, res) => {
   try {
-    const { baseUrl, apiKey, modelId } = req.body || {}
+    const { providerId, baseUrl, apiKey, modelId } = req.body || {}
     if (!baseUrl || !apiKey || !modelId) {
       return res.status(400).json({ success: false, error: 'baseUrl, apiKey, modelId 都必须提供' })
+    }
+    // [M11] 恢复被遮罩的 apiKey：如果前端发回 ****，用存储中的原始 key 替换
+    let realApiKey = String(apiKey)
+    if (realApiKey.includes('****')) {
+      if (!providerId) {
+        return res.status(400).json({ success: false, error: 'apiKey 已遮罩时必须提供 providerId 以恢复真实密钥' })
+      }
+      const dir = await getStockAnalysisDir()
+      const existingConfig = await getStockAnalysisAIConfig(dir)
+      const original = existingConfig.providers.find((p) => p.id === providerId)?.apiKey
+      if (!original) {
+        return res.status(400).json({ success: false, error: `未找到 providerId=${providerId} 对应的真实 apiKey` })
+      }
+      realApiKey = original
     }
     // SSRF 防护: 校验 baseUrl 不指向内网
     const urlStr = String(baseUrl)
@@ -547,7 +561,7 @@ router.post('/ai-config/test-model', async (req, res) => {
       id: 'test',
       name: 'test',
       baseUrl: String(baseUrl),
-      apiKey: String(apiKey),
+      apiKey: realApiKey,
       models: [String(modelId)],
       enabled: true,
       concurrency: 1,

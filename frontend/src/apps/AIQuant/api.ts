@@ -197,11 +197,11 @@ export function assignModelToExtractionAgent(agentId: LLMExtractionAgentId, mode
   })
 }
 
-export function testModelConnectivity(baseUrl: string, apiKey: string, modelId: string) {
+export function testModelConnectivity(providerId: string, baseUrl: string, apiKey: string, modelId: string) {
   return requestJson<StockAnalysisModelTestResult>('/api/system/stock-analysis/ai-config/test-model', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ baseUrl, apiKey, modelId }),
+    body: JSON.stringify({ providerId, baseUrl, apiKey, modelId }),
   })
 }
 

@@ -482,7 +482,7 @@ export function AIConfigTab() {
   async function handleTestModel(providerId: string, baseUrl: string, apiKey: string, modelId: string) {
     setTesting(true)
     try {
-      const result = await testModelConnectivity(baseUrl, apiKey, modelId)
+      const result = await testModelConnectivity(providerId, baseUrl, apiKey, modelId)
       setTestResults((prev) => ({ ...prev, [`${providerId}:${modelId}`]: result }))
     } catch (err) {
       // 如果请求失败，构造本地失败结果
