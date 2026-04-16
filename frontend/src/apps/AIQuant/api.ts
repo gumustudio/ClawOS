@@ -135,6 +135,26 @@ export function ignoreStockAnalysisSignal(signalId: string, note: string) {
   })
 }
 
+export interface AutoExecuteResult {
+  tradeDate: string
+  totalSignals: number
+  autoBoughtCount: number
+  autoIgnoredCount: number
+  skippedCount: number
+  autoBought: Array<{ code: string; name: string; weight: number; price: number }>
+  autoIgnored: Array<{ code: string; name: string; action: string }>
+  skipped: Array<{ code: string; name: string; reason: string }>
+}
+
+/** 一键自动执行：今日强烈买入信号自动买入，买入/观望信号自动忽略 */
+export function autoExecuteDailyStrategy(tradeDate?: string) {
+  return requestJson<AutoExecuteResult>('/api/system/stock-analysis/auto-execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(tradeDate ? { tradeDate } : {}),
+  })
+}
+
 export function closeStockAnalysisPosition(positionId: string, payload: { quantity: number; price?: number; note?: string }) {
   return requestJson<StockAnalysisTradeRecord>(`/api/system/stock-analysis/positions/${positionId}/close`, {
     method: 'POST',

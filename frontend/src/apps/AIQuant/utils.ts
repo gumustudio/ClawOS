@@ -178,6 +178,8 @@ export function decisionSourceLabel(source: string, signalAction?: string): { la
     case 'user_override': return { label: '已主动买入', badge: 'bg-green-100 text-green-700' }
     case 'user_rejected': return { label: '已放弃', badge: 'bg-amber-100 text-amber-700' }
     case 'user_ignored': return { label: '已忽略', badge: 'bg-slate-100 text-slate-600' }
+    case 'system_auto_buy': return { label: '系统自动买入', badge: 'bg-emerald-100 text-emerald-700' }
+    case 'system_auto_ignore': return { label: '系统自动忽略', badge: 'bg-slate-100 text-slate-500' }
     default: return { label: '待处理', badge: 'bg-blue-100 text-blue-700' }
   }
 }

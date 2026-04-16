@@ -5150,7 +5150,12 @@ export async function getStockAnalysisHealthStatus(stockAnalysisDir: string): Pr
   }
 }
 
-export async function confirmStockAnalysisSignal(stockAnalysisDir: string, signalId: string, request: StockAnalysisTradeRequest) {
+export async function confirmStockAnalysisSignal(
+  stockAnalysisDir: string,
+  signalId: string,
+  request: StockAnalysisTradeRequest,
+  options?: { bypassTradingHours?: boolean; autoBuy?: boolean },
+) {
   const { signals, signal } = await findSignalByIdAcrossDates(stockAnalysisDir, signalId)
   if (!signal) return null
 
@@ -5180,10 +5185,12 @@ export async function confirmStockAnalysisSignal(stockAnalysisDir: string, signa
     throw new Error('买入信号必须指定委托数量')
   }
 
-  // Fix 2: 涉及实际买入的操作必须在交易时间内
-  const tradingCheck = checkTradingAvailability()
-  if (!tradingCheck.canTrade) {
-    throw new Error(`当前不可交易：${tradingCheck.reason}`)
+  // Fix 2: 涉及实际买入的操作必须在交易时间内（自动买入流程可旁路）
+  if (!options?.bypassTradingHours) {
+    const tradingCheck = checkTradingAvailability()
+    if (!tradingCheck.canTrade) {
+      throw new Error(`当前不可交易：${tradingCheck.reason}`)
+    }
   }
 
   // P0-3: 交易操作加互斥锁，防止并发竞态导致数据丢失
@@ -5290,7 +5297,9 @@ export async function confirmStockAnalysisSignal(stockAnalysisDir: string, signa
     }
     const quantity = request.quantity
     const openedAt = nowIso()
-    const sourceDecision: DecisionSource = isWatchOrNone ? 'user_override' : 'user_confirmed'
+    const sourceDecision: DecisionSource = options?.autoBuy
+      ? 'system_auto_buy'
+      : isWatchOrNone ? 'user_override' : 'user_confirmed'
 
     // P1-3: 基于实际买入价格重新计算止损止盈价（而非使用信号生成时的静态价格）
     const stopLossPrice = round(price * (1 - config.stopLossPercent / 100))
@@ -5316,7 +5325,7 @@ export async function confirmStockAnalysisSignal(stockAnalysisDir: string, signa
       trailingStopEnabled: true,
       highestPriceSinceOpen: price,
       action: 'hold',
-      actionReason: isWatchOrNone ? '用户推翻观望，主动开仓' : '新开仓',
+      actionReason: options?.autoBuy ? '系统自动开仓（强烈买入信号）' : isWatchOrNone ? '用户推翻观望，主动开仓' : '新开仓',
     }
 
     const trade: StockAnalysisTradeRecord = {
@@ -5330,7 +5339,7 @@ export async function confirmStockAnalysisSignal(stockAnalysisDir: string, signa
       weight: targetWeight,
       sourceSignalId: signal.id,
       sourceDecision,
-      note: request.note?.trim() || (isWatchOrNone ? '用户推翻观望建议，主动买入' : '用户确认执行 AI 策略'),
+      note: request.note?.trim() || (options?.autoBuy ? '系统自动买入：根据强烈买入信号自动开仓' : isWatchOrNone ? '用户推翻观望建议，主动买入' : '用户确认执行 AI 策略'),
       relatedPositionId: position.id,
       pnlPercent: null,
       buyDate: openedAt,
@@ -5351,7 +5360,7 @@ export async function confirmStockAnalysisSignal(stockAnalysisDir: string, signa
   })
 }
 
-export async function rejectStockAnalysisSignal(stockAnalysisDir: string, signalId: string, note: string, decisionSource: 'user_rejected' | 'user_ignored') {
+export async function rejectStockAnalysisSignal(stockAnalysisDir: string, signalId: string, note: string, decisionSource: 'user_rejected' | 'user_ignored' | 'system_auto_ignore') {
   const { signals, signal } = await findSignalByIdAcrossDates(stockAnalysisDir, signalId)
   if (!signal) return null
 
@@ -5364,6 +5373,117 @@ export async function rejectStockAnalysisSignal(stockAnalysisDir: string, signal
   await saveStockAnalysisSignals(stockAnalysisDir, signal.tradeDate, nextSignals)
   saLog.audit('Service', `${decisionSource}: ${signal.code} tradeDate=${signal.tradeDate} note=${note.trim()}`)
   return nextSignals.find((item) => item.id === signalId) ?? null
+}
+
+/**
+ * 自动决策：对今日信号执行自动买入 + 自动忽略
+ *
+ * 规则：
+ *   - strong_buy 信号：按推荐顺序自动买入，单只 30% 仓位，总仓位上限 100%
+ *     - 已持仓的标的跳过
+ *     - 剩余仓位不足 30% 时，按剩余仓位买入
+ *     - 剩余仓位 = 0 后停止
+ *   - buy / watch 信号：标记为 system_auto_ignore，备注「买入信号不够强烈，条件满足度不够高」
+ *   - 其他信号（sell / hold / none / 已被人工处理过的）：跳过不动
+ *
+ * @param tradeDate 指定交易日（YYYY-MM-DD），默认 today
+ */
+export async function runAutoDecisions(stockAnalysisDir: string, tradeDate?: string) {
+  const targetDate = tradeDate || todayDate()
+  const dailySignals = await readStockAnalysisSignals(stockAnalysisDir, targetDate)
+  if (!dailySignals || dailySignals.length === 0) {
+    saLog.audit('AutoDecisions', `no signals for ${targetDate}`)
+    return {
+      tradeDate: targetDate,
+      totalSignals: 0,
+      autoBoughtCount: 0,
+      autoIgnoredCount: 0,
+      skippedCount: 0,
+      autoBought: [] as Array<{ code: string; name: string; weight: number; price: number }>,
+      autoIgnored: [] as Array<{ code: string; name: string; action: string }>,
+      skipped: [] as Array<{ code: string; name: string; reason: string }>,
+    }
+  }
+
+  // strong_buy 按 finalScore 降序排（推荐顺序）
+  const strongBuySignals = dailySignals
+    .filter((s) => s.action === 'strong_buy' && s.decisionSource === 'system')
+    .sort((a, b) => b.finalScore - a.finalScore)
+
+  // buy + watch 待忽略
+  const ignoreCandidates = dailySignals.filter(
+    (s) => (s.action === 'buy' || s.action === 'watch') && s.decisionSource === 'system',
+  )
+
+  const autoBought: Array<{ code: string; name: string; weight: number; price: number }> = []
+  const skipped: Array<{ code: string; name: string; reason: string }> = []
+  const SINGLE_WEIGHT = 0.3
+  const TOTAL_CAP = 1.0
+
+  // 自动买入循环
+  for (const signal of strongBuySignals) {
+    // 每次循环都重新读持仓（前一次已保存）
+    const positions = await readStockAnalysisPositions(stockAnalysisDir)
+    if (positions.some((p) => p.code === signal.code)) {
+      skipped.push({ code: signal.code, name: signal.name, reason: '已持仓，跳过' })
+      continue
+    }
+    const totalWeight = positions.reduce((sum, p) => sum + p.weight, 0)
+    const remaining = round(TOTAL_CAP - totalWeight, 4)
+    if (remaining <= 0.001) {
+      skipped.push({ code: signal.code, name: signal.name, reason: '总仓位已满' })
+      continue
+    }
+    const targetWeight = round(Math.min(SINGLE_WEIGHT, remaining), 4)
+    // quantity 占位（不算钱不算股数，仅满足后端必填校验）：用 1 股最小占位
+    // 注：后续如果接真实交易，这里需要换成 weight × 总资产 ÷ price 的真实股数
+    const placeholderQty = 1
+    try {
+      const result = await confirmStockAnalysisSignal(
+        stockAnalysisDir,
+        signal.id,
+        { quantity: placeholderQty, weight: targetWeight, note: `系统自动买入 · 仓位 ${(targetWeight * 100).toFixed(0)}%` },
+        { bypassTradingHours: true, autoBuy: true },
+      )
+      if (result && 'code' in result) {
+        autoBought.push({ code: result.code, name: result.name, weight: result.weight, price: result.costPrice })
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : '未知错误'
+      saLog.audit('AutoDecisions', `auto-buy failed ${signal.code}: ${reason}`)
+      skipped.push({ code: signal.code, name: signal.name, reason })
+    }
+  }
+
+  // 自动忽略循环
+  const autoIgnored: Array<{ code: string; name: string; action: string }> = []
+  const IGNORE_NOTE = '买入信号不够强烈，条件满足度不够高'
+  for (const signal of ignoreCandidates) {
+    try {
+      await rejectStockAnalysisSignal(stockAnalysisDir, signal.id, IGNORE_NOTE, 'system_auto_ignore')
+      autoIgnored.push({ code: signal.code, name: signal.name, action: signal.action })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : '未知错误'
+      saLog.audit('AutoDecisions', `auto-ignore failed ${signal.code}: ${reason}`)
+      skipped.push({ code: signal.code, name: signal.name, reason })
+    }
+  }
+
+  saLog.audit(
+    'AutoDecisions',
+    `tradeDate=${targetDate} bought=${autoBought.length} ignored=${autoIgnored.length} skipped=${skipped.length}`,
+  )
+
+  return {
+    tradeDate: targetDate,
+    totalSignals: dailySignals.length,
+    autoBoughtCount: autoBought.length,
+    autoIgnoredCount: autoIgnored.length,
+    skippedCount: skipped.length,
+    autoBought,
+    autoIgnored,
+    skipped,
+  }
 }
 
 export async function closeStockAnalysisPosition(stockAnalysisDir: string, positionId: string, request: StockAnalysisTradeRequest) {

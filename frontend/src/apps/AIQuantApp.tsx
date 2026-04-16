@@ -30,6 +30,7 @@ import {
   refreshStockAnalysisStockPool,
   rejectStockAnalysisSignal,
   runStockAnalysisDaily,
+  autoExecuteDailyStrategy,
   runStockAnalysisPostMarket,
   startIntradayMonitor,
   stopIntradayMonitor,
@@ -497,6 +498,31 @@ export default function AIQuantApp() {
         riskPriority: 'critical',
         category: 'analysis',
       })
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  async function autoExecuteStrategy() {
+    if (actionLoading) return
+    const confirmed = window.confirm(
+      '一键自动执行：将对今日「强烈买入」信号按推荐顺序自动开仓（每只 30%，总仓位 100% 上限），并将「买入」「观望」信号自动标记为忽略。\n\n确定执行？',
+    )
+    if (!confirmed) return
+    setActionLoading(true)
+    try {
+      const result = await autoExecuteDailyStrategy()
+      await loadOverview()
+      const summary = `自动买入 ${result.autoBoughtCount} 只 · 自动忽略 ${result.autoIgnoredCount} 个 · 跳过 ${result.skippedCount} 个`
+      showToast('success', `一键自动执行完成：${summary}`)
+      void safeNotify('一键自动执行完成', summary, 'success', {
+        dedupeKey: `auto-execute:${result.tradeDate}:${result.autoBoughtCount}:${result.autoIgnoredCount}`,
+        riskPriority: 'medium',
+        category: 'analysis',
+      })
+    } catch (requestError) {
+      const message = (requestError as Error).message
+      showToast('error', `一键自动执行失败: ${message}`)
     } finally {
       setActionLoading(false)
     }
@@ -1177,6 +1203,7 @@ export default function AIQuantApp() {
                   onReducePosition={(position, qty) => void submitPositionReduce(position, qty)}
                   onDismissAction={(position) => void submitPositionDismiss(position)}
                   tradingStatus={tradingStatus}
+                  onAutoExecute={() => void autoExecuteStrategy()}
                 />
               )}
               {activeTab === 'risk' && <RiskTab overview={overview} onClosePosition={(position) => void submitPositionClose(position)} onReducePosition={(position, qty) => void submitPositionReduce(position, qty)} actionLoading={actionLoading} tradingStatus={tradingStatus} />}

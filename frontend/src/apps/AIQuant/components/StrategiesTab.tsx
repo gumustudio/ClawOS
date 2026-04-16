@@ -42,10 +42,11 @@ export interface StrategiesTabProps {
   onReducePosition: (position: StockAnalysisPosition, reduceQuantity: number) => void
   onDismissAction: (position: StockAnalysisPosition) => void
   tradingStatus: { canTrade: boolean; reason: string | null }
+  onAutoExecute: () => void
 }
 
 export function StrategiesTab(props: StrategiesTabProps) {
-  const { overview, topSignal, actionMode, setActionMode, note, setNote, quantity, setQuantity, targetWeight, setTargetWeight, onSubmit, actionLoading, onSelectSignal, onClosePosition, onReducePosition, onDismissAction, tradingStatus } = props
+  const { overview, topSignal, actionMode, setActionMode, note, setNote, quantity, setQuantity, targetWeight, setTargetWeight, onSubmit, actionLoading, onSelectSignal, onClosePosition, onReducePosition, onDismissAction, tradingStatus, onAutoExecute } = props
   const conviction = buildConvictionStats(overview.topSignals, overview.marketState)
   const isBuySignal = topSignal ? (topSignal.action === 'strong_buy' || topSignal.action === 'buy') : false
   const isAlreadyOperated = topSignal ? topSignal.decisionSource !== 'system' : false
@@ -72,7 +73,17 @@ export function StrategiesTab(props: StrategiesTabProps) {
       {/* 统计信息条 */}
       <div className="flex-shrink-0 mb-3">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-xl font-bold text-slate-800">每日策略</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-bold text-slate-800">每日策略</h2>
+            <button
+              onClick={onAutoExecute}
+              disabled={actionLoading}
+              title="对今日「强烈买入」信号按推荐顺序自动开仓（每只 30%，总仓位 100% 上限），并将「买入」「观望」信号自动标记为忽略"
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              一键自动执行
+            </button>
+          </div>
           {overview.marketRegime && overview.fusionWeights ? (
             <div className="flex items-center gap-3 text-xs text-slate-500">
               <span className="font-medium text-indigo-600">{marketRegimeLabel(overview.marketRegime)}</span>

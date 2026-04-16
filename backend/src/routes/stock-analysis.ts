@@ -32,6 +32,7 @@ import {
   refreshStockAnalysisStockPool,
   rejectStockAnalysisSignal,
   runStockAnalysisDaily,
+  runAutoDecisions,
   runStockAnalysisPostMarket,
   startIntradayMonitor,
   stopIntradayMonitor,
@@ -218,6 +219,21 @@ router.post('/run/daily', async (_req, res) => {
     res.json({ success: true, data })
   } catch (error) {
     logger.error(`AI 炒股 daily run 失败: ${(error as Error).message}`, { module: 'StockAnalysis' })
+    res.status(500).json({ success: false, error: sanitizeErrorMessage(error) })
+  }
+})
+
+/**
+ * 一键自动执行：对今日信号执行自动买入（强烈买入）+ 自动忽略（买入/观望）
+ * 不接券商，仅写入 positions/trades/signals JSON 文件
+ */
+router.post('/auto-execute', async (req, res) => {
+  try {
+    const tradeDate = typeof req.body?.tradeDate === 'string' ? req.body.tradeDate : undefined
+    const data = await runAutoDecisions(await getStockAnalysisDir(), tradeDate)
+    res.json({ success: true, data })
+  } catch (error) {
+    logger.error(`AI 炒股 auto-execute 失败: ${(error as Error).message}`, { module: 'StockAnalysis' })
     res.status(500).json({ success: false, error: sanitizeErrorMessage(error) })
   }
 })
