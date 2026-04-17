@@ -2354,13 +2354,9 @@ function evaluateMarketLevelRisk(marketState: StockAnalysisMarketState, config: 
 
   const newPositionsAllowed = !extremeBearActive && !liquidityCrisisActive
   const buyAllowed = !liquidityCrisisActive
-  const effectiveMaxPositionRatio = liquidityCrisisActive
-    ? config.lowLiquidityGuardrail.crisisMaxPositionRatio
-    : lowLiquidityActive
-      ? config.lowLiquidityGuardrail.maxPositionRatio
-      : extremeVolatilityActive
-        ? 0.50
-        : 0.85
+  // 按用户决策解除仓位比例压制：effectiveMaxPositionRatio 直接跟随用户配置的 maxTotalPosition（默认 1.0），
+  // 不再由 lowLiquidityGuardrail / extremeVolatility 压低。极端熊市/流动性危机仍通过 newPositionsAllowed / buyAllowed 硬拦截。
+  const effectiveMaxPositionRatio = config.maxTotalPosition ?? 1.0
 
   return {
     extremeBearActive,

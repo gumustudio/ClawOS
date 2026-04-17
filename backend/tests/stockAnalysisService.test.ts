@@ -370,7 +370,8 @@ test('market level risk uses position haircut instead of buy veto on low-liquidi
   assert.equal(marketRisk.lowLiquidityActive, true)
   assert.equal(marketRisk.buyAllowed, true)
   assert.equal(marketRisk.newPositionsAllowed, true)
-  assert.equal(marketRisk.effectiveMaxPositionRatio, 0.65)
+  // v1.31.0 起 effectiveMaxPositionRatio 跟随 config.maxTotalPosition（默认 1.0），不再由 lowLiquidityGuardrail 压制
+  assert.equal(marketRisk.effectiveMaxPositionRatio, 1.0)
 })
 
 test('low liquidity guardrail thresholds are configurable', () => {
@@ -405,5 +406,6 @@ test('low liquidity guardrail thresholds are configurable', () => {
   assert.equal(isLowLiquidityGuardrail(marketState, customConfig), false)
   const marketRisk = evaluateMarketLevelRisk(marketState, customConfig)
   assert.equal(marketRisk.lowLiquidityActive, false)
-  assert.equal(marketRisk.effectiveMaxPositionRatio, 0.85)
+  // v1.31.0 起 effectiveMaxPositionRatio 跟随 config.maxTotalPosition（默认 1.0）
+  assert.equal(marketRisk.effectiveMaxPositionRatio, 1.0)
 })
