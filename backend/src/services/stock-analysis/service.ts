@@ -5290,9 +5290,15 @@ export async function confirmStockAnalysisSignal(
       } catch (error) {
         saLog.audit('Service', `confirmSignal: ${signal.code} 获取实时行情失败: ${error instanceof Error ? error.message : '未知错误'}，回退到 signal.latestPrice=${signal.latestPrice}`)
       }
-      // 兜底：实时行情拿不到时用信号生成时的价格
+      // 兜底：实时行情拿不到时，优先用 signal.realtime（盘中 cron 写入的 T 日实时价），
+      // 再兜底到 signal.latestPrice（注意：这个值来自信号生成时的 snapshot，早盘前生成=昨收价，可能偏离实盘）
       if (price == null || price <= 0) {
-        price = signal.latestPrice
+        if (signal.realtime && signal.realtime.latestPrice > 0) {
+          price = signal.realtime.latestPrice
+          saLog.audit('Service', `confirmSignal: ${signal.code} 回退到 signal.realtime.latestPrice=${price}（fetchedAt=${signal.realtime.fetchedAt}）`)
+        } else {
+          price = signal.latestPrice
+        }
       }
     }
     const quantity = request.quantity
@@ -5373,6 +5379,71 @@ export async function rejectStockAnalysisSignal(stockAnalysisDir: string, signal
   await saveStockAnalysisSignals(stockAnalysisDir, signal.tradeDate, nextSignals)
   saLog.audit('Service', `${decisionSource}: ${signal.code} tradeDate=${signal.tradeDate} note=${note.trim()}`)
   return nextSignals.find((item) => item.id === signalId) ?? null
+}
+
+/**
+ * v1.30.2: 刷新指定交易日 signals 文件里每条信号的 realtime 字段（盘中实时行情）
+ *
+ * 背景：signals 文件由盘前 08:05 cron 生成并落盘，此时市场未开盘，snapshot 的 latestPrice/
+ * changePercent/open/high/low 只能是昨收数据，一整天不会自动更新。前端如果直接读 snapshot
+ * 展示，用户看到的将是「昨天的收盘价」当作「今天的实时价」——与官方行情严重不符。
+ *
+ * 方案：保持 snapshot 不变（作为信号生成时的历史基准，用于策略溯源、支撑压力位等计算），
+ * 新增 realtime 字段承载盘中实时行情；本函数由 09:30-15:00 每 5 分钟 cron 调用。
+ *
+ * 失败容错：数据源全挂时保留旧 realtime（不清空），只写 saLog 便于排查。
+ *
+ * @param tradeDate 指定交易日（YYYY-MM-DD），默认今日
+ * @returns 刷新统计
+ */
+export async function refreshSignalsRealtime(
+  stockAnalysisDir: string,
+  tradeDate?: string,
+): Promise<{ tradeDate: string; updated: number; skipped: number; fetchedAt: string | null }> {
+  const targetDate = tradeDate || todayDate()
+  const signals = await readStockAnalysisSignals(stockAnalysisDir, targetDate)
+  if (!signals || signals.length === 0) {
+    saLog.audit('RefreshRealtime', `no signals for ${targetDate}`)
+    return { tradeDate: targetDate, updated: 0, skipped: 0, fetchedAt: null }
+  }
+
+  const codes = signals.map((s) => s.code)
+  let quoteMap: Map<string, StockAnalysisSpotQuote>
+  try {
+    const envelope = await getQuoteData(stockAnalysisDir, codes)
+    quoteMap = envelope.data
+  } catch (error) {
+    saLog.error('RefreshRealtime', `getQuoteData 失败 tradeDate=${targetDate} error=${error instanceof Error ? error.message : '未知'}`)
+    return { tradeDate: targetDate, updated: 0, skipped: signals.length, fetchedAt: null }
+  }
+
+  const fetchedAt = nowIso()
+  let updated = 0
+  let skipped = 0
+  const nextSignals = signals.map((signal) => {
+    const quote = quoteMap.get(signal.code)
+    if (!quote || !Number.isFinite(quote.latestPrice) || quote.latestPrice <= 0) {
+      skipped += 1
+      return signal
+    }
+    updated += 1
+    return {
+      ...signal,
+      realtime: {
+        latestPrice: quote.latestPrice,
+        changePercent: quote.changePercent,
+        open: quote.open,
+        high: quote.high,
+        low: quote.low,
+        previousClose: quote.previousClose,
+        fetchedAt,
+      },
+    }
+  })
+
+  await saveStockAnalysisSignals(stockAnalysisDir, targetDate, nextSignals)
+  saLog.audit('RefreshRealtime', `tradeDate=${targetDate} updated=${updated} skipped=${skipped} fetchedAt=${fetchedAt}`)
+  return { tradeDate: targetDate, updated, skipped, fetchedAt }
 }
 
 /**

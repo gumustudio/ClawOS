@@ -33,6 +33,7 @@ import {
   rejectStockAnalysisSignal,
   runStockAnalysisDaily,
   runAutoDecisions,
+  refreshSignalsRealtime,
   runStockAnalysisPostMarket,
   startIntradayMonitor,
   stopIntradayMonitor,
@@ -234,6 +235,21 @@ router.post('/auto-execute', async (req, res) => {
     res.json({ success: true, data })
   } catch (error) {
     logger.error(`AI 炒股 auto-execute 失败: ${(error as Error).message}`, { module: 'StockAnalysis' })
+    res.status(500).json({ success: false, error: sanitizeErrorMessage(error) })
+  }
+})
+
+/**
+ * v1.30.2: 手动刷新 signals 文件的 realtime 字段（盘中实时行情）
+ * 盘中 cron 每 5 分钟自动刷新；此接口供前端手动触发或历史数据回填
+ */
+router.post('/signals/refresh-realtime', async (req, res) => {
+  try {
+    const tradeDate = typeof req.body?.tradeDate === 'string' ? req.body.tradeDate : undefined
+    const data = await refreshSignalsRealtime(await getStockAnalysisDir(), tradeDate)
+    res.json({ success: true, data })
+  } catch (error) {
+    logger.error(`AI 炒股 refresh-realtime 失败: ${(error as Error).message}`, { module: 'StockAnalysis' })
     res.status(500).json({ success: false, error: sanitizeErrorMessage(error) })
   }
 })

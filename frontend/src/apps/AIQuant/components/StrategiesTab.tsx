@@ -189,7 +189,20 @@ export function StrategiesTab(props: StrategiesTabProps) {
                     ) : null}
                   </div>
                   <div className={`grid ${isBuySignal ? 'grid-cols-4' : 'grid-cols-1'} gap-3 mt-2 text-sm`}>
-                    <div>现价: <span className="font-semibold">{topSignal.latestPrice.toFixed(2)}</span> <span className={`font-bold text-xs ${topSignal.snapshot.changePercent >= 0 ? 'text-red-600' : 'text-green-600'}`}>{topSignal.snapshot.changePercent >= 0 ? '+' : ''}{topSignal.snapshot.changePercent.toFixed(2)}%</span></div>
+                    {(() => {
+                      // v1.30.2: realtime 优先，回退到 snapshot（处理盘前/未刷新场景）
+                      const rt = topSignal.realtime
+                      const displayPrice = rt?.latestPrice ?? topSignal.latestPrice
+                      const displayChange = rt?.changePercent ?? topSignal.snapshot.changePercent
+                      const fetchedLabel = rt?.fetchedAt
+                        ? new Date(rt.fetchedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Shanghai' })
+                        : null
+                      return (
+                        <div>现价: <span className="font-semibold">{displayPrice.toFixed(2)}</span> <span className={`font-bold text-xs ${displayChange >= 0 ? 'text-red-600' : 'text-green-600'}`}>{displayChange >= 0 ? '+' : ''}{displayChange.toFixed(2)}%</span>
+                          {fetchedLabel ? <span className="ml-1 text-[10px] text-slate-400">· {fetchedLabel}更新</span> : <span className="ml-1 text-[10px] text-amber-500">· 盘前基准价</span>}
+                        </div>
+                      )
+                    })()}
                     {isBuySignal ? (
                       <>
                         <div>仓位: <span className="font-semibold">{Math.round(topSignal.suggestedPosition * 100)}%</span></div>
@@ -198,12 +211,12 @@ export function StrategiesTab(props: StrategiesTabProps) {
                       </>
                     ) : null}
                   </div>
-                  {/* 当日 OHLC 行情 */}
+                  {/* 当日 OHLC 行情（realtime 优先，回退 snapshot） */}
                   <div className="grid grid-cols-4 gap-3 mt-1.5 text-xs text-slate-500">
-                    <div>开盘 <span className="font-semibold text-slate-700">{formatPrice(topSignal.snapshot.open)}</span></div>
-                    <div>最高 <span className="font-semibold text-red-600">{formatPrice(topSignal.snapshot.high)}</span></div>
-                    <div>最低 <span className="font-semibold text-green-600">{formatPrice(topSignal.snapshot.low)}</span></div>
-                    <div>昨收 <span className="font-semibold text-slate-700">{formatPrice(topSignal.snapshot.previousClose)}</span></div>
+                    <div>开盘 <span className="font-semibold text-slate-700">{formatPrice(topSignal.realtime?.open ?? topSignal.snapshot.open)}</span></div>
+                    <div>最高 <span className="font-semibold text-red-600">{formatPrice(topSignal.realtime?.high ?? topSignal.snapshot.high)}</span></div>
+                    <div>最低 <span className="font-semibold text-green-600">{formatPrice(topSignal.realtime?.low ?? topSignal.snapshot.low)}</span></div>
+                    <div>昨收 <span className="font-semibold text-slate-700">{formatPrice(topSignal.realtime?.previousClose ?? topSignal.snapshot.previousClose)}</span></div>
                   </div>
                   {topSignal.supportResistance ? (
                     <div className="flex items-center gap-4 mt-2 text-xs">
@@ -468,16 +481,21 @@ export function StrategiesTab(props: StrategiesTabProps) {
                       ) : null}
                     </div>
                   </div>
-                  {/* 价格行情 */}
+                  {/* 价格行情（v1.30.2: realtime 优先，回退 snapshot） */}
                   <div className="flex items-center justify-between mt-1.5 text-xs">
-                    <span className="font-semibold text-slate-800">{signal.latestPrice.toFixed(2)}</span>
-                    <span className={`font-bold ${signal.snapshot.changePercent >= 0 ? 'text-red-600' : 'text-green-600'}`}>{signal.snapshot.changePercent >= 0 ? '+' : ''}{signal.snapshot.changePercent.toFixed(2)}%</span>
+                    <span className="font-semibold text-slate-800">{(signal.realtime?.latestPrice ?? signal.latestPrice).toFixed(2)}</span>
+                    {(() => {
+                      const chg = signal.realtime?.changePercent ?? signal.snapshot.changePercent
+                      return (
+                        <span className={`font-bold ${chg >= 0 ? 'text-red-600' : 'text-green-600'}`}>{chg >= 0 ? '+' : ''}{chg.toFixed(2)}%</span>
+                      )
+                    })()}
                   </div>
                   <div className="grid grid-cols-4 gap-1 mt-1 text-[10px] text-slate-400">
-                    <div>开 <span className="text-slate-600">{formatPrice(signal.snapshot.open)}</span></div>
-                    <div>收 <span className="text-slate-600">{signal.latestPrice.toFixed(2)}</span></div>
-                    <div>高 <span className="text-red-500">{formatPrice(signal.snapshot.high)}</span></div>
-                    <div>低 <span className="text-green-600">{formatPrice(signal.snapshot.low)}</span></div>
+                    <div>开 <span className="text-slate-600">{formatPrice(signal.realtime?.open ?? signal.snapshot.open)}</span></div>
+                    <div>现 <span className="text-slate-600">{(signal.realtime?.latestPrice ?? signal.latestPrice).toFixed(2)}</span></div>
+                    <div>高 <span className="text-red-500">{formatPrice(signal.realtime?.high ?? signal.snapshot.high)}</span></div>
+                    <div>低 <span className="text-green-600">{formatPrice(signal.realtime?.low ?? signal.snapshot.low)}</span></div>
                   </div>
                   <div className="grid grid-cols-3 gap-2 mt-1.5 text-xs text-slate-500">
                     <div>专家 {Math.round(signal.expert.consensus * 100)}%</div>

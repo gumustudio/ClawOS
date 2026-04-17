@@ -12,6 +12,7 @@ import {
   runStockAnalysisDaily,
   runStockAnalysisPostMarket,
   runAutoDecisions,
+  refreshSignalsRealtime,
   startIntradayMonitor,
   stopIntradayMonitor,
 } from './service'
@@ -159,6 +160,48 @@ export function initStockAnalysisScheduler() {
         const msg = (error as Error).message
         saLog.error('scheduler', `cron:autoExecute 开盘自动执行失败 错误=${msg}`)
         logger.error(`AI 炒股开盘自动执行失败: ${msg}`, { module: 'StockAnalysis' })
+      })
+  }, CRON_OPTIONS)
+
+  // v1.30.2: 盘中实时行情刷新 — 工作日 09:30-15:00 每 5 分钟刷新 signals 文件的 realtime 字段
+  // 解决"早盘前生成 signals → 一整天展示昨收价"的时效性 bug
+  // 不覆盖 snapshot（snapshot 保持为信号生成时的历史基准），只写入 signal.realtime
+  // 使用两条 cron：09:30-09:55 每 5 分钟 + 10:00-14:59 每 5 分钟 + 15:00（单次收盘定格）
+  //   node-cron 不支持跨段步长，用 '*/5 9-14 * * 1-5' + 额外兜底 15:00
+  // 失败不重试，下一个 tick 会自然重刷，容错设计在 refreshSignalsRealtime 内部
+  cron.schedule('*/5 9-14 * * 1-5', () => {
+    if (!isTradingDay()) return
+    const now = new Date()
+    const beijingHours = Number(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false }))
+    const beijingMinutes = Number(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai', minute: '2-digit' }))
+    // 只在实际交易时段跑：09:30-11:30, 13:00-15:00
+    const inMorningSession = (beijingHours === 9 && beijingMinutes >= 30) || (beijingHours === 10) || (beijingHours === 11 && beijingMinutes <= 30)
+    const inAfternoonSession = beijingHours >= 13 && beijingHours <= 14
+    if (!inMorningSession && !inAfternoonSession) {
+      return
+    }
+    void getStockAnalysisDir()
+      .then((dir) => refreshSignalsRealtime(dir))
+      .then((result) => {
+        saLog.info('scheduler', `cron:refreshRealtime 完成 tradeDate=${result.tradeDate} updated=${result.updated} skipped=${result.skipped}`)
+      })
+      .catch((error) => {
+        const msg = (error as Error).message
+        saLog.error('scheduler', `cron:refreshRealtime 失败 错误=${msg}`)
+      })
+  }, CRON_OPTIONS)
+
+  // v1.30.2: 15:00 收盘定格 — 独立一次，抓取当日最终收盘行情写入 realtime
+  cron.schedule('0 15 * * 1-5', () => {
+    if (!isTradingDay()) return
+    void getStockAnalysisDir()
+      .then((dir) => refreshSignalsRealtime(dir))
+      .then((result) => {
+        saLog.info('scheduler', `cron:refreshRealtime 收盘定格完成 tradeDate=${result.tradeDate} updated=${result.updated} skipped=${result.skipped}`)
+      })
+      .catch((error) => {
+        const msg = (error as Error).message
+        saLog.error('scheduler', `cron:refreshRealtime 收盘定格失败 错误=${msg}`)
       })
   }, CRON_OPTIONS)
 

@@ -168,6 +168,19 @@ export interface StockAnalysisSignal {
   createdAt: string
   decisionSource: 'system' | 'user_confirmed' | 'user_rejected' | 'user_ignored' | 'user_override'
   userDecisionNote: string | null
+  /**
+   * v1.30.2: 盘中实时行情（与 snapshot 分离，snapshot 保持为信号生成时刻的历史基准）
+   * 为 null/undefined 表示盘前/节假日尚未刷新，前端应回退到 snapshot/latestPrice 展示
+   */
+  realtime?: {
+    latestPrice: number
+    changePercent: number
+    open: number
+    high: number
+    low: number
+    previousClose: number
+    fetchedAt: string
+  } | null
 }
 
 export interface StockAnalysisPosition {

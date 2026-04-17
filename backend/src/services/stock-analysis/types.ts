@@ -49,6 +49,22 @@ export interface StockAnalysisSpotQuote {
   circulatingMarketCap: number
 }
 
+/**
+ * v1.30.2: 信号实时行情快照
+ * 用于与 snapshot（信号生成时的历史基准）分离，让前端展示实时价格时不污染历史数据。
+ * 盘中由 cron 每 5 分钟刷新一次；盘前/节假日为 null。
+ */
+export interface StockAnalysisSignalRealtime {
+  latestPrice: number
+  changePercent: number
+  open: number
+  high: number
+  low: number
+  previousClose: number
+  /** 数据抓取时间（ISO 8601），用于前端展示"XX:XX 更新" */
+  fetchedAt: string
+}
+
 export interface StockAnalysisMarketState {
   asOfDate: string
   trend: MarketTrend
@@ -232,6 +248,11 @@ export interface StockAnalysisSignal {
   createdAt: string
   decisionSource: DecisionSource
   userDecisionNote: string | null
+  /**
+   * v1.30.2: 盘中实时行情（与 snapshot 分离，snapshot 保持为信号生成时刻的历史基准）
+   * 为 null 表示盘前/节假日尚未刷新。
+   */
+  realtime?: StockAnalysisSignalRealtime | null
 }
 
 export interface StockAnalysisPosition {
