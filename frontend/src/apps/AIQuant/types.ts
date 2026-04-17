@@ -751,7 +751,7 @@ export interface MarketLevelRiskState {
   extremeVolatilityActive: boolean
   /** 流动性危机：成交量<10th百分位，仅允许卖出 */
   liquidityCrisisActive: boolean
-  /** 有效最大仓位比例（正常0.85，极端波动时0.50） */
+  /** 有效最大仓位比例（默认1.0，用户已解除仓位比例压制；仅保留极端熊市/流动性危机硬拦截） */
   effectiveMaxPositionRatio: number
   /** 是否允许新开仓 */
   newPositionsAllowed: boolean

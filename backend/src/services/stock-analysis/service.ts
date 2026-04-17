@@ -5224,9 +5224,10 @@ export async function confirmStockAnalysisSignal(
     let effectiveMaxTotalPosition = config.maxTotalPosition ?? 1.0
 
     // P1-5: 检查市场级风控（极端熊市/流动性危机时阻止开仓）
+    // 注：仓位比例压制（lowLiquidityGuardrail.maxPositionRatio）已按用户决策移除，
+    // 仅保留 extremeBear/liquidityCrisis 的硬拦截，低流动性仅记录 info 日志
     if (latestMarketState) {
       const marketRisk = evaluateMarketLevelRisk(latestMarketState, config)
-      effectiveMaxTotalPosition = Math.min(effectiveMaxTotalPosition, marketRisk.effectiveMaxPositionRatio)
       if (marketRisk.extremeBearActive) {
         throw new Error('市场级风控：极端熊市状态，暂停所有新开仓')
       }

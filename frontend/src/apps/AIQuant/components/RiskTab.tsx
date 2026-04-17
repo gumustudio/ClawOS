@@ -463,7 +463,7 @@ export function RiskTab({ overview, onClosePosition, onReducePosition, actionLoa
                 <span className="text-xs text-slate-500">仓位占用</span>
                 <div className="flex items-baseline gap-1">
                   <span className="font-bold text-slate-800 text-lg">{Math.round(totalPosition * 100)}%</span>
-                  <span className="text-xs text-slate-400">/ {Math.round((overview.marketLevelRisk?.effectiveMaxPositionRatio ?? 0.85) * 100)}%</span>
+                  <span className="text-xs text-slate-400">/ {Math.round((overview.marketLevelRisk?.effectiveMaxPositionRatio ?? 1.0) * 100)}%</span>
                 </div>
               </div>
               <div>

@@ -52,7 +52,7 @@ export function StrategiesTab(props: StrategiesTabProps) {
   const isAlreadyOperated = topSignal ? topSignal.decisionSource !== 'system' : false
   const operatedInfo = topSignal ? decisionSourceLabel(topSignal.decisionSource, topSignal.action) : null
   const currentTotalPosition = overview.positions.reduce((sum, position) => sum + position.weight, 0)
-  const maxTotalPosition = overview.marketLevelRisk?.effectiveMaxPositionRatio ?? 0.85
+  const maxTotalPosition = overview.marketLevelRisk?.effectiveMaxPositionRatio ?? 1.0
   const remainingPositionPercent = Math.max(0, Math.round((maxTotalPosition - currentTotalPosition) * 100))
 
   /** 判断该操作是否需要交易时间 */

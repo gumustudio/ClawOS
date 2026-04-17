@@ -77,8 +77,8 @@ const DEFAULT_RUNTIME_STATUS: StockAnalysisRuntimeStatus = {
 
 export const DEFAULT_STOCK_ANALYSIS_CONFIG: StockAnalysisStrategyConfig = {
   maxPositions: 3,
-  maxSinglePosition: 0.3,
-  maxTotalPosition: 0.85,
+  maxSinglePosition: 1.0,
+  maxTotalPosition: 1.0,
   stopLossPercent: 3,
   takeProfitPercent1: 3,
   takeProfitPercent2: 6,
