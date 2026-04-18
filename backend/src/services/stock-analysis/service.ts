@@ -2394,7 +2394,19 @@ function updatePositionRuntime(position: StockAnalysisPosition, quote: StockAnal
       actionReason = '持仓天数达到上限，需强制评估'
     }
   }
-  return { ...position, currentPrice: quote.latestPrice, highestPriceSinceOpen, returnPercent: round(returnPercent), holdingDays, action, actionReason }
+  // dismiss 保护：如果用户已忽略过当前 action，保持 hold；如果 action 升级了则清除 dismiss 并触发新提醒
+  let dismissedAction = position.dismissedAction ?? null
+  if (dismissedAction) {
+    if (action === dismissedAction) {
+      // 同级别提醒已被忽略，保持 hold
+      action = 'hold'
+      actionReason = `用户已忽略${dismissedAction === 'stop_loss' ? '止损' : dismissedAction === 'take_profit' ? '止盈' : dismissedAction === 'reduce' ? '减仓' : '评估'}提醒`
+    } else if (action !== 'hold') {
+      // action 变化了（升级或降级），清除 dismiss，触发新提醒
+      dismissedAction = null
+    }
+  }
+  return { ...position, currentPrice: quote.latestPrice, highestPriceSinceOpen, returnPercent: round(returnPercent), holdingDays, action, actionReason, dismissedAction }
 }
 
 function calculatePerformance(trades: StockAnalysisTradeRecord[]) {
@@ -5823,6 +5835,7 @@ export async function dismissPositionAction(stockAnalysisDir: string, positionId
     ...position,
     action: 'hold',
     actionReason: `用户忽略了${previousAction === 'stop_loss' ? '止损' : previousAction === 'take_profit' ? '止盈' : previousAction === 'reduce' ? '减仓' : '评估'}提醒`,
+    dismissedAction: previousAction,
   }
 
   const updatedPositions = positions.map((item) => item.id === positionId ? updatedPosition : item)

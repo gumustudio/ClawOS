@@ -275,6 +275,8 @@ export interface StockAnalysisPosition {
   highestPriceSinceOpen: number
   action: PositionAction
   actionReason: string
+  /** 用户已忽略的 action 类型，防止 overview 重新计算时覆盖 dismiss 状态 */
+  dismissedAction?: PositionAction | null
 }
 
 export interface StockAnalysisTradeRecord {

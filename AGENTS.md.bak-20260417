@@ -1,0 +1,1333 @@
+# ClawOS
+
+## Goal
+打造一个专属于 Chris Wong 的轻量级私有云桌面 (Web GUI)，类似飞牛 OS 的操作体验。统一管理本地 OpenClaw 聊天、文件浏览、系统和应用监控，供 Tailscale 远程访问使用。
+
+## Tech Stack
+- Frontend: React + Vite + TypeScript + Tailwind CSS + shadcn/ui
+- Backend: Node.js + Express (Read-only System Probe + APIs for Apps)
+- Apps Integrated: OpenClaw (embedded proxy), FileBrowser (embedded proxy), Aria2 (downloads), AList (netdisk proxies), Music API, Video CMS.
+
+## Architecture
+- `frontend/` - React UI (Desktop Shell)
+- `backend/` - Node.js Backend API (System stats, AList proxy, Aria2 RPC proxy, Music/Video search)
+- `scripts/` - Deployment and automation scripts
+- `logs/` - Local log files for self-debugging and monitoring
+
+## Decisions & Context
+- **Zero-Invasion Principle**: OpenClaw gateway will not be modified. Its UI will be embedded via iframe.
+- **Security-First**: The backend avoids arbitrary execution. Tools like Aria2 and AList run as user systemd services and are proxied.
+- **App-Based Modularity**:
+  - `Notes`: Simple local JSON storage.
+  - `Downloads`: Uses Aria2 backend over RPC.
+  - `Netdisk`: Uses AList to mount Baidu/Quark, pushes to Aria2.
+  - `Music`: Refactored as a dedicated Netease app with QR Login and User Playlists, supports VIP cookies via UI.
+  - `Video`: Built-in MacCMS sources for movies, plays via hls.js.
+- **Reader / 每日简报**:
+  - 资讯工作目录已统一为 `/home/chriswong/文档/RSS资讯`，并纳入服务端路径配置中心的 `readerDir`。
+  - OpenClaw 后续不直接调 ClawOS 私有 API 写文章，而是按 `docs/rss-openclaw-ingest-spec.md` 规范把 JSON 文件投递到 `RSS资讯/inbox/pending/`。
+  - ClawOS Reader 负责扫描 `inbox`、导入本地文章库、去重、分类、生成每日简报，并把结果落到 `feeds/` 与 `briefs/`。
+- **AI 炒股 / Stock Analysis**:
+  - 工作目录已统一为 `/home/chriswong/文档/AI炒股分析`，并纳入服务端路径配置中心的 `stockAnalysisDir`。
+  - 后端采用 `Node/TypeScript 主业务 + Python/AKShare 受控子进程补充 A 股指数/成分股数据` 的混合方式，仍然保持主服务在 ClawOS 现有 TS 后端内。
+  - 当前真实股票池以 `中证500 (000905)` 成分股为基准；Node 层负责行情拉取、市场状态检测、初筛、三流评分、Conviction Filter、持仓与交易日志。
+  - `AI 炒股` 前端已从纯 mock 升级为真实 API 驱动，显示市场状态、候选信号、持仓风控、交易记录、观望日志与模型组表现。
+
+## Session Log
+
+### 2026-04-17
+- **v1.30.2 修复 signals 盘前生成后全天不刷新导致前端展示 T-1 收盘价**（commit `7d2c340`）
+  - **根因**：signals 由 `cron '5 8 * * 1-5'` 盘前 08:05 一次性生成，此时未开盘 `getQuoteData()` 只能拿到昨收；文件落盘后一整天不更新，前端 StrategiesTab 读的就是静态昨收价。用户以华丰科技 688629 为例实测：ClawOS 显示 131.88 -0.08%，东财官方 136.40 +3.43%
+  - **方案（快照/实时分离）**：
+    - Signal 新增 `realtime: { latestPrice, changePercent, open, high, low, previousClose, fetchedAt }` 字段，`snapshot` 保持盘前基准不动（供回测和历史追溯）
+    - `service.ts` 新增 `refreshSignalsRealtime(dir, tradeDate?)`，只刷新 realtime 字段
+    - `scheduler.ts` 新增两条 Asia/Shanghai cron：`*/5 9-14 * * 1-5`（盘中 9:30-11:30 / 13:00-14:59 自校验后刷新）+ `0 15 * * 1-5`（收盘定格）
+    - 新增 `POST /signals/refresh-realtime` 手动触发接口
+    - `StrategiesTab.tsx` 两处展示改为 `realtime?.xxx ?? snapshot.xxx`，加「HH:MM 更新 / 盘前基准价」徽章
+    - `confirmStockAnalysisSignal` 的 fallback 优先级：`realtime.latestPrice > signal.latestPrice`
+  - **验证**：手动 POST refresh-realtime 返回 updated=39/skipped=0，华丰 realtime=136.40 +3.43% 与东财官方完全一致
+  - **重要教训**：cron 一次性生成的持久化文件不能作为"实时视图"使用；任何展示"当前价"的字段都必须有刷新机制，否则盘前落盘的数据会全天误导用户
+
+### 2026-04-16 (session 3)
+- v1.29.17 修复模型组表现统计两个严重问题（commit `ec62c92`）：
+  - **问题 1**：只显示 3 个 LLM 模型，实际配置 4 个（kimi-k2.5 缺失）。根因：`buildModelGroupPerformance()` 只处理当天运行的 signals，kimi-k2.5 当天全部 fallback 导致 0 个 vote
+  - **问题 2**：模型组缺少供应商标注，无法区分同一模型不同供应商
+  - **修复**：重写 `buildModelGroupPerformance()` 为 async，聚合全部 12 个历史信号文件（15660 个 votes），按 `providerId/modelId` 组合键分组
+  - 标准化 modelId（GLM-5→glm-5, qwen3.5-plus→qwen3.6-plus），旧数据无 provider 时只显示模型名
+  - 前后端类型新增 `modelId/providerId/providerName/displayName` 字段
+  - `llm-inference.ts` vote 记录 provider 信息（含 fallback 场景）
+  - 修复后显示 6 组：rules(5220) + glm-5(4177) + qwen3.6-plus(2726) + mimo-v2-pro(1988) + kimi-k2.5(1033) + kimi-for-coding(516)
+
+### 2026-04-16 (session 2)
+- v1.29.16 修复自选股票 Tab 3 个 Bug：
+  - **Bug 1 (严重)**：同花顺 K 线源 `fetchStockHistoryFromTonghuashun()` 字段解析顺序错误。API 实际返回 `[date, open, high, low, close, ...]`，代码按 `[date, open, close, high, low, ...]` 解析，导致 close/high/low 三个字段循环错位，所有 K 线蜡烛图显示为阳线。修复：line 948 解构顺序改正，line 959 previousClose 索引从 `[2]` 改为 `[4]`
+  - **Bug 2**：`getWatchlistWithQuotes()` 中 `name` 优先级从 `spot?.name ?? item.name` 改为 `item.name || spot?.name`，避免腾讯实时行情 API 返回的 GBK 编码乱码
+  - **Bug 3**：AIQuantApp.tsx 内容容器在 watchlist tab 时条件性使用 `overflow-hidden`（其他 tab 保留 `overflow-y-auto`），配合 WatchlistTab.tsx 中 SVG `height="100%"` + flex 布局修复，确保一屏显示
+  - 清除全部 500 个错误 K 线缓存文件并验证修复：60 条 K 线 OHLC 错误数 0，阳线 31/阴线 29 分布合理
+  - K 线阳线蜡烛改为红色空心 + 加粗描边，阴线绿色实心
+  - commit `0efe6d8`，已 push + 重启服务
+- **重要发现记录**：清除缓存后必须立即重启服务，否则旧进程会用错误代码重新写入缓存
+
+### 2026-04-16
+- v1.29.14 完成「策略页面 OHLC 行情数据展示」：
+  - **问题**：每日策略候选股列表完全没有显示价格信息（开盘/收盘/最高/最低），盯盘时无法判断是否该买入
+  - **根因**：数据采集层（东方财富等）已获取完整 OHLC，但 `buildSnapshot()` 转换时丢弃了 `open/high/low/previousClose` 四个字段
+  - 后端 `types.ts` `StockAnalysisStockSnapshot` 接口补充 4 个必填字段
+  - 后端 `service.ts` `buildSnapshot()` 从 `SpotQuote` 中填充 OHLC
+  - 前端 `types.ts` 同步补充 4 个可选字段（兼容旧数据）
+  - 前端 `utils.ts` 新增 `formatPrice()` 安全格式化函数
+  - 前端 `StrategiesTab.tsx`：
+    - 右侧候选列表新增：现价 + 涨跌幅百分比 + 开/收/高/低四格行情
+    - 左侧详情面板：现价行增加涨跌幅颜色标注，新增开盘/最高/最低/昨收行
+  - 前后端 build 通过，commit `707eb6e`，已 push + 重启服务
+- 中英文 README 更新：重点突出天华新能 04-13 当天涨 +17.42% 的高光交易（commit `5b44173`）
+
+### 2026-04-13 (session 3)
+- 完成上一轮会话遗留的所有待办事项：
+  - 英文 `README_EN.md` 新增完整的 "AI Stock Trading: Real Results" 板块（与中文版对齐）
+  - 前后端 build 验证通过
+  - commit `9e9ef88`：README 新增 AI 炒股实战战绩 + 系统说明页面全面更新（含截图 `.github/stock-trading-proof.png`、中英文 README、GuideTab.tsx）
+  - 已 push + 重启 clawos.service
+
+### 2026-04-13 (session 2)
+- v1.29.13 完成「晨间补充数据采集」功能：
+  - `store.ts` 新增 `mergeFactPool()`、`mergeLLMExtractionResult()`、`deduplicateByKey()` 合并函数
+  - `service.ts` 新增 `runMorningSupplementAnalysis()` 函数，只跑 Phase 4（数据采集）+ Phase 5（LLM 信息提取），结果合并到前一个交易日的事实池
+  - `scheduler.ts` 新增 07:30 cron 任务（交易日守卫 + 防重复机制）
+  - 前后端 build 通过，commit `b9f2f03`，已 push + 重启服务
+
+### 2026-04-12 (session 2)
+- 完成剩余 13 处硬编码路径替换：
+  - `backend/tests/configRoutes.test.ts` — 6 处 assert 值改为 `path.join(tempHome, ...)`
+  - `backend/tests/probe.test.ts` — crontab 模拟内容改为 `${tempHome}` 拼接
+  - `frontend/src/lib/serverPaths.test.ts` — 5 处 mock 路径改为 `/mock/home/...`
+  - `filebrowser/docker-compose.yml` — `/home/chriswong:/srv` 改为 `${HOME}:/srv`
+- Git 作者信息更换为 GitHub noreply：`gumustudio <29919616+gumustudio@users.noreply.github.com>`
+- 前后端 build 通过，最终安全扫描确认 Git 追踪文件中无 `/home/chriswong` 残留
+- amend commit `2db0f5a` + force push 完成
+- **公开仓库安全审计+硬编码清除全部完成**
+
+### 2026-04-12
+- v1.29.11 完成「记忆复盘」页面 UI 布局全面重写：
+  - 顶部改为 KPI 条带一字排开（累计收益/胜率/盈亏比/夏普替代/最大回撤/观望准确率/主观判断），替代原先分散的 MetricCard。
+  - 主体改为 grid-cols-5：左 3/5（周度绩效 + 预警建议 + 4 个绩效图表 2x2）+ 右 2/5（周报卡片 + 月度汇总 + 最近交易）。
+  - 底部 grid-cols-5：左 3/5 模型组表格 + 右 2/5 观望日志。
+  - 间距从 gap-3 缩减到 gap-2，内边距从 p-3 缩减到 p-2.5，信息密度大幅提升。
+  - 右侧最近交易列表增加 max-height 260px + overflow-y-auto 限高滚动，防止数据多时撑破布局。
+- v1.29.10 完成「记忆复盘」页面全面审计修复，共修复 7 个 bug（B1-B7）：
+  - **B1+B2 (P0)**：`buildWeeklySummary()` 从不计算 winRate 和 cumulativeReturn，始终为 0，现已按周内卖出交易胜负比和跨周累加正确计算。
+  - **B4+B5 (P1)**：`buildMonthlySummary()` 同样补充了 winRate 和 maxDrawdown 计算。
+  - **B6 (P1)**：`calculatePerformance()` cumulativeReturn 从加权平均改为简单求和，与 weeklyReturn 语义一致，修复累计收益 -4.33% → +6.59%。
+  - **B7 (P2)**：trades.json 中 6 笔历史卖出交易回填 buyDate/sellDate，8 笔买入交易补充 buyDate/sellDate=null，修复持有天数始终显示 1 天。
+  - 清除修复前生成的 `weekly-summary.json` 和 `monthly-summary.json` 旧缓存。
+- 验证结果：后端 113 测试断言全部通过，前后端 build 通过，服务重启后 API 返回正确数据。
+- B8 (P2, getWeekLabel/getMonthLabel UTC vs 北京时间) 未修复，A 股交易时段内无实际影响，保持低优先级。
+
+### 2026-04-11
+- v1.29.9 已完成，包含以下三项改动：
+  1. **Conviction Filter 门槛统一下调 2 分**：覆盖全部 5 种市场 regime（bull/bear/high_vol/low_vol/normal），代码默认值 `store.ts` 和持久化配置 `config/strategy.json` 同步更新，补全了之前缺失的 `high_volatility` 和 `low_volatility_range` regime；目标是将当前 2.78% 的通过率提升到 10%-30% 健康区间。
+  2. **Override（主观判断）追踪机制**：后端 `buildOverrideStats()` 通过 `relatedPositionId` 关联买卖记录，分别统计 override 和 system 交易的胜率/平均收益；`performanceDashboard` 输出 `overrideStats`；前端 `MemoryTab` 新增"主观判断"绩效卡片和周度仪表板行。
+  3. **Override 正反馈信号放宽**：当 watch 判定无一票否决、分数差距 < 5 分、且 override 胜率 > 60%（样本 >= 3）时，自动升级为 buy 并在日志和 passingChecks 注明原因。
+- 验证结果：后端 11 测试通过、前端 14 测试通过、双端 build 通过。
+- 盘后实跑验证（04-11）：fact-pool 质量分 100，全球市场字段 7（比以往多 1），所有数据采集成功，回退逻辑未被触发（因为采集本身无故障）。
+- 待观察：下一个交易日 conviction pass rate 是否提升；override 正反馈是否在接近门槛的 watch 信号上实际生效。
+
+### 2026-04-10
+- 已完成 AI 炒股盘后数据采集“真实备份回退”这一轮后端收口：`backend/src/services/stock-analysis/data-agents.ts` 现已把 fact-pool 最近成功快照回退正式抽成独立逻辑，对 `macro_economy`、`social_sentiment`、`global_markets` 三类最易抖动源做最小兜底。
+- 当前回退判定规则为：宏观有效字段数 `<= 1` 时回退，社交舆情样本 `< 3` 时回退，全球市场有效字段 `= 0` 时回退；回退后会保留原始错误，并追加 `已回退到最近成功...快照(日期)`，避免把回退伪装成实时成功。
+- 已补 `backend/tests/stockAnalysisDataAgents.test.ts`，覆盖 `readRecentFactPools/getRecentFactPoolBackup` 行为以及 macro/social/global 三类回退场景；`npx tsx --test tests/stockAnalysisDataAgents.test.ts` 通过，`backend npm run build` 通过。
+- 当前仍未执行真实 `POST /api/system/stock-analysis/run/post-market` 实跑，因为该入口会写入 fact-pool、post-market 报告与运行时状态，属于有副作用的真实盘后执行；下次继续时应先确认是否允许直接触发，并在触发后检查最新 `fact-pool-YYYY-MM-DD.json` 与 `logs/stock-analysis-YYYY-MM-DD.log` 是否出现明确回退审计信息。
+
+### 2026-04-09
+- 已继续完成 AI 炒股交易体验增强收尾：
+- 1) `RiskTab` 现在会直接展示每个持仓的买入时间，并在当天买入的持仓上显示 `T+1 限制中，今日不可卖出` 标签；平仓/减半按钮在该状态下会禁用并给出明确 tooltip。
+- 2) `StrategiesTab` 的买入表单已从单纯数字输入升级为“目标仓位百分比输入 + 滑条”，并新增“当前已用总仓位 / 市场有效总仓上限 / 理论剩余可用仓位”提示，降低用户手工算仓位的心智负担。
+- 3) `MemoryTab` 的最近交易记录现已补充“持有 X 天”和“原因: ...”展示，配合上一轮新增的 `buyDate / sellDate`，现在能更直观看到每笔交易的买卖时点、持有时长和执行原因。
+- 本轮验证结果：前端 build 通过，后端 build 通过。
+
+### 2026-04-09
+- 已修复 AI 炒股 3 个实盘级交易/通知问题：
+- 1) 买入仓位此前被后端直接写死为 `signal.suggestedPosition`，前端也只展示不可编辑的“建议仓位”，导致用户明明总仓位还有空间，却无法灵活分配单票仓位；现已允许前端输入“目标仓位(%)”，并把该值传到后端，后端仍继续校验 `maxSinglePosition`、`maxTotalPosition` 和市场级风控上限，不再默认强锁 30%。
+- 2) `AIQuantApp` 里的“关键通知历史”之前只是本地筛选展示，没有删除入口；现已接入 `useNotificationStore.removeNotification(...)`，每条关键通知右上角可直接删除，不会再长期挡界面。
+- 3) 持仓交易此前没有 A 股 T+1 约束，导致当天买入当天就能卖出/减仓；现已在 `closeStockAnalysisPosition(...)` 和 `reduceStockAnalysisPosition(...)` 加上 T+1 校验：若 `openedAt` 属于当天，直接拒绝卖出并返回明确错误。
+- 交易记录可解释性也同步增强：`StockAnalysisTradeRecord` 新增可选 `buyDate` / `sellDate`，买入/卖出/减仓时会写入，前端 `MemoryTab` 已改为直接展示“买入时间 / 卖出时间”，方便追查每笔交易真实发生时点。
+- 本轮验证结果：新增 `backend/tests/stockAnalysisTradingRules.test.ts`，覆盖“当天买入不可平仓/减仓”两个场景；配合 `stockAnalysisRoutes.test.ts` 共 `3/3` 通过，后端 build 通过，前端 build 通过。前端全量 `npm test` 仍被仓库既有的旧类型测试阻塞，与本轮改动无关。
+
+### 2026-04-09
+- 已修复 AI 数据收集一轮严重可用性问题，根因分两类：一是 `global_markets` 依赖的东方财富 `push2his` 行情接口在 2026-04-09 实测中返回 `rc=102/data=null`，导致全球指数/商品主源整体失效；二是多个数据采集 Agent 虽然前端允许配置 `600000ms` 超时，但内部 `runPythonJson(...)` 之前仍默认卡死在 `60s`，实际把 AKShare 宏观、LPR、微博舆情、全球市场等慢接口提前超时杀掉。
+- 后端 `backend/src/services/stock-analysis/data-agents.ts` 已新增 Yahoo Finance 备用链路，用于补齐 `global_markets` 的标普/纳指/恒生、黄金、原油、美元兑人民币和美债 10Y；同时所有 Agent 内部 Python/AKShare 调用现已显式继承各自 `timeoutMs`，不再偷偷回落到 60 秒默认超时。
+- 同时修正了 `createAgentResult(...)` 的成功率口径：从“按错误数直接扣到 0”改为“数据点 / (数据点 + 错误数)”，避免 `macro_economy` 这类“有部分数据但两个源失败”的场景被错误显示成 0%。
+- 前端 `DataCollectionTab` 已修正两处误导展示：`数据质量` 不再把 66 分错误显示成 `6600分`；对于 `dataPointCount > 0` 且 `successRate >= 0.5` 的 Agent，单一源失败现在会显示灰色“提示”而不是红色“错误”，避免“部分可用”被渲染成“整块失效”。
+- 本轮验证结果：`backend/tests/stockAnalysisDataAgents.test.ts` 已补到 `6/6` 通过，后端 build 通过，前端 build 通过。后续若 Yahoo Finance 也出现区域性不可用，再考虑为宏观和全球市场补第三条独立只读备用源，但当前先保持最小修复。
+
+### 2026-04-09
+- 已完成 AI 炒股实测前收尾：新增 `buildIndustryTrendMapForStockPool(...)`，行业 20/60 日趋势现在会优先复用本轮 history，再尽量从本地历史缓存和必要的补抓中扩展到更完整的股票池样本，不再只依赖候选子集。
+- 信号评分与持仓复评已正式拆成“基础分 / bonus / 最终分”口径：`StockAnalysisSignal` 新增 `scoreBonus`，`compositeScore` 明确表示基础分，`finalScore` 表示决策分；`StockAnalysisPositionEvaluation` 新增 `currentFinalScore` / `buyFinalScore`，`scoreDelta` 现在只比较基础分，避免被买入时一次性 bonus 扭曲。
+- 前端 `RiskTab` 与 `dashboardMeta` 已同步改文案，明确展示“买入基础分 / 当前基础分 / 当前最终分”，降低真实测试时的解释歧义。
+- 收尾验证结果：后端 `stockAnalysisScoringUpgrade + stockAnalysisPositionEval` 共 `16/16` 通过，后端 build 通过，前端 build 通过。当前版本更适合迎接第二天真实测试。
+
+### 2026-04-09
+- 已完成 AI 炒股技术/量化升级第四轮：`StockAnalysisStockSnapshot` 新增 `momentumRank20d` / `momentumRank60d`，daily run 主链路新增 `buildCrossSectionalMomentumMap(...)` 与 `applyCrossSectionalMomentumRanks(...)`，将 20/60 日收益横截面百分位正式接入量化分的 `crossSectionalStrength`。
+- 同时修复了一个关键一致性问题：daily run 内候选信号与持仓评估现在共享同一轮横截面 rank 基准，避免同一天内买入评分与持仓复评使用不同相对强弱口径。
+- 本轮升级相关验证结果：后端评分升级测试文件 `9/9` 通过，后端 build 通过，前端 build 通过。
+- 复审后的剩余风险已记录：行业 20/60 日趋势当前仍基于本轮可计算样本而非无条件完整股票池；持仓复评分与买入信号分数在业务上仍非完全同口径，因为买入信号还叠加额外方向 bonus，后续如需继续提升可解释性应拆开基础分与最终分。
+
+### 2026-04-09
+- 已完成 AI 炒股技术/量化升级第三轮：新增 `buildIndustryTrendMap(...)`，基于真实股票池行业名 + 真实个股历史 K 线聚合行业 `20日/60日` 收益，并生成 `industryTrendStrength` 百分位，用于补强 A 股行业中期趋势判断。
+- `StockAnalysisStockSnapshot` 现已新增并实际填充 `industryReturn20d`、`industryReturn60d`、`industryTrendStrength`；量化分与候选池初筛已同步纳入这些字段，避免“当日强、但中期已走弱”的行业被误抬高。
+- 已新增测试覆盖：行业中期趋势排名、多周期行业字段注入、以及“单日火热但中期走弱行业不应被高估”的场景；升级相关后端测试文件 `7/7` 通过，后端 build 通过，前端 build 通过。
+- 重要设计约束：只在 daily run 这类已拿到整池历史数据的主链路中计算行业 20/60 日趋势；对于 overview/持仓即时评估等仅掌握单只历史的路径，宁可留空也不使用单只股票去伪装整个行业趋势，继续保持“数据真实、可靠、及时”。
+
+### 2026-04-08
+- 已完成技术/量化升级第二轮：接入真实行业分类和行业相对强弱。`StockAnalysisWatchlistCandidate` / `StockAnalysisSpotQuote` 新增 `industryName`；东方财富批量 quote 主源接入 `f100` 行业字段，腾讯主源缺行业时自动回退股票池缓存中的真实行业名，不再优先依赖代码前缀猜测。
+- 新增 `buildIndustryStrengthMap(...)`，用真实股票池 + 真实当日行情计算行业平均涨跌幅、上涨家数占比和行业强弱百分位；`snapshot.sector` 现优先显示真实行业，`snapshot.industryStrength` / `industryBreadth` 已纳入量化分和候选池初筛。
+- 已新增测试覆盖行业强弱逻辑，后端测试现为 `179/179` 通过，`npm run build` 通过。当前设计刻意不引入伪造的概念热度或行业热度，只使用可审计的真实字段，继续保持“对用户资金负责、每轮修改都先收测试”的节奏。
+- 已开始把 AI 炒股技术分析 / 量化分析从“经验型简化打分”升级为更可靠的纯行情派生评分体系，严格遵守“数据真实、可靠、及时，不影响现有正常功能，对用户资金负责”的约束。
+- 第一轮已完成后端落地：`service.ts` 新增并接入 `RSI / MACD / ATR / MA120 / 多周期动量 / 均线斜率 / 支撑阻力距离` 等指标，全部基于现有真实 K 线和行情计算，不引入伪行业、伪估值或伪情绪数据。
+- 技术分已升级为内部五维结构：`trend / momentumConfirmation / structure / participation / risk`；量化分已升级为内部五维结构：`mediumTermMomentum / crossSectionalStrength / liquidityQuality / stability / meanReversion`；同时保留旧字段兼容，避免前端和历史链路被直接打断。
+- 候选池初筛已从原先偏单一的 `return20d + volumeBreakout` 改为更平衡的结构化入口，综合中期动量、技术结构、流动性质量和稳定性，并将候选池从 30 扩到 60，以降低入口偏差。
+- 已新增 `backend/tests/stockAnalysisScoringUpgrade.test.ts` 覆盖新指标与新评分逻辑；中途修复了旧 mock 缺少新字段导致的 `NaN` 兼容问题，最终后端测试 `178/178` 通过、`npm run build` 通过。
+- 前端本轮仅同步类型定义，不强改展示逻辑，优先保证系统稳定；下一轮更适合先观察真实信号输出，再决定是否把新子项展示到策略页。
+- 已按用户要求产出 `docs/stock-analysis-tech-quant-upgrade-plan-2026-04-09.md`，系统性规划 AI 炒股技术分析 / 量化分析升级方向，内容覆盖：技术流升级草案、量化流升级草案、字段设计、评分结构、候选池初筛改造、验证方案与迭代纪律。文档明确把“数据真实、可靠、及时”“不影响现有正常功能”“每完善一点就复盘测试”“对用户资金负责”作为后续迭代硬约束，当前先出文档，等待用户拍板后再进入代码迭代。
+- 已完成 AI 炒股前端实时刷新第一版：新增 `frontend/src/apps/AIQuant/autoRefresh.ts` 统一管理刷新节奏，`AIQuantApp.tsx` 现会自动刷新 `overview + tradingStatus`，规则为盘中每 30 秒、非盘中每 60 秒；此外在 `window focus`、`visibilitychange` 回到前台、浏览器 `online` 恢复、以及 09:15/09:25/09:30/11:30/13:00/14:57/15:00/15:05/16:00 等关键时间边界时也会主动拉新数据，顶部工具栏同时展示“自动刷新 Ns / 上次更新时间”。
+- 设计取舍：暂时不为 AI 炒股单独引入 SSE/WebSocket 全量状态推送，而是先复用现有 overview API 做统一前端调度，优先以最小改动解决“15 点后仍显示可交易”“盘中监控状态不变”“必须手动刷新”的实时体验问题。
+- 验证结果：前端 `npm run build` 通过；`npm test` 仍受仓库既有的测试类型问题影响（`dashboardMeta.test.ts`、`musicViewCache.test.ts`），本次改动新增的 `autoRefresh.test.ts` 已纳入测试入口。
+- 已补一个轻量可用性优化：`expert-analysis` 接口新增 `analyzedAt` 字段，取当日信号中最新的 `createdAt`；前端 `ExpertAnalysisTab` 的日期选择器右侧现显示“更新于 ...”，方便直接判断当前查看的是哪次专家分析结果。
+- `GuideTab` 的系统说明页已同步到最新实现，补齐了 45 位专家（30 LLM + 15 规则）、`AI专家分析` / `AI数据收集` 审计页、真实社交舆情来源（雪球 + 微博为主、热榜为辅）、高危通知常驻、数据采集 Agent 默认 `600000ms` 和盘后最长 3 小时窗口等说明；前后端 build 均再次通过。
+- 已完成 AI 炒股前端收尾：`frontend/src/apps/AIQuant/components/DataCollectionTab.tsx` 里此前把 `primarySocialSentiment` / `supplementarySocialSentiment` / `platformLabelMap` 定义在父组件、却在 `FactPoolPanel` 中使用，导致 TypeScript 作用域报错、前端 build 阻塞。现已将社交舆情分组逻辑收回 `FactPoolPanel` 内部，并把 `children` 类型改为显式导入的 `ReactNode`，`frontend npm run build` 已重新通过。
+- 已修复 AI 炒股 `social_sentiment` 的严重真实性问题：原实现虽然访问真实接口，但核心情绪值常退化为“涨跌幅代理”或默认 `0.33/0.33/0.34`，会让结果看起来像模拟数据。现已切换为 **AKShare 雪球讨论/关注热度 + AKShare 微博舆情报告** 两条真实源为主，10jqka/东方财富热榜只保留为热点补充。
+- 新增 `backend/tests/socialSentiment.test.ts`，覆盖股票代码规范化和情绪分桶逻辑；后端测试与构建已再次通过。
+- AI 炒股超时策略继续按“宁可慢也要尽量跑完”收口：`testModelConnectivity()` 已提升到 60 秒；数据采集 Agent 默认超时与前端可配置上限现统一为 `600000ms`，避免默认值仍停留在 15/60 秒而与 UI 允许上限脱节。
+- 用户刚把阿里云默认模型从 `qwen3.5-plus` 替换为 `qwen3.6-plus`；真实 `ai-config.json` 中对应 provider、专家分配和 layer 默认模型已同步更新，后续验证应以 `qwen3.6-plus` 为准。
+- AI 炒股后端已补上 `kimi-for-coding` 的协议适配：新增 `backend/src/services/stock-analysis/llm-provider-adapter.ts` 统一按 `provider + model` 选择协议，普通模型继续走 OpenAI `/chat/completions`，`api.kimi.com/coding + kimi-for-coding` 自动切到 Anthropic `/v1/messages`，避免 Kimi Coding 被旧兼容层误判为不可用。
+- `service.ts` 的 `testModelConnectivity()`、`memory.ts` 的记忆压缩调用、现有 `llm-inference.ts` / `llm-extraction.ts` 已统一复用同一个 adapter，避免只有专家投票能用 Kimi、其他链路仍报 403 的分裂状态。
+- 已新增 `backend/tests/llmProviderAdapter.test.ts`，覆盖 Kimi Coding 识别、Anthropic messages URL 拼接、usage 归一化；后端测试现为 `170/170` 通过，`npm run build` 通过。
+- 已用真实配置 `/home/chriswong/文档/AI炒股分析/config/ai-config.json` 对 `Kimi / kimi-for-coding` 做连通性验证，结果成功：`testModelConnectivity()` 返回 `success: true`，延迟约 12.7s，说明新的协议适配在真实 key 与真实 endpoint 下可用。
+- 当前剩余未自动执行的动作：真实 `ai-config.json` 里 `kimi-for-coding` 仍未分配给任何专家或提取 Agent，因此如果要继续验证“真实专家投票/提取链路”，下一步应先由用户确认是否把 Kimi 分配到至少一个专家或一个 extraction agent。
+- 继续把 AI 炒股剩余的可用性问题一口气补齐：`llm-inference.ts` 与 `llm-extraction.ts` 现在会过滤已知无效的 `provider + model` fallback 候选（当前先排除 `OpenCodeGo/MiMo-V2-Pro`、`OpenCodeGo/GLM-5`），避免把有限的超时预算浪费在明确不支持的模型上。
+- `service.ts` 补强了市场流动性与盘后超时的审计日志：盘后开始后会记录当日流动性状态；触发低流动性护栏或流动性危机时会带上 `volumePercentile / risingRatio / sentiment` 解释；超过 3 小时窗口时会明确记录停在哪个 phase。
+- 低流动性相关参数已最小化配置化到 `StockAnalysisStrategyConfig.lowLiquidityGuardrail`，包括成交额分位阈值、危机判定广度阈值、扣分值、低流动性仓位上限、危机仓位上限；`store.ts` 默认配置与兼容合并逻辑已同步更新。
+- 已补测试覆盖：`llmInference.test.ts` / `llmExtraction.test.ts` 校验无效 fallback 候选过滤；`stockAnalysisService.test.ts` 校验低流动性阈值可配置；`stockAnalysisPositionEval.test.ts` 同步补齐新配置字段。
+- 继续把 AI 炒股“整轮日终批处理窗口 3 小时”真正落到代码：`service.ts` 新增 `POST_MARKET_BATCH_WINDOW_MS = 3 * 60 * 60 * 1000`，`runStockAnalysisPostMarket()` 支持 `maxDurationMs` 选项，并在 Phase 1/2/3/4/5/7/6 的阶段边界及持仓评估循环前检查 deadline；一旦超出窗口，会在安全边界抛错停止，避免调度层无限拖长。
+- `scheduler.ts` 的盘后 cron 日志现在会显式记录 3 小时窗口，便于从本地日志判断本轮批处理采用的全局预算。
+- 新增 `backend/tests/stockAnalysisScheduler.test.ts`，专门验证 3 小时批处理窗口常量和超时中断逻辑。
+- AI 炒股后端完成一轮针对“慢模型 + 大数据量 + 误杀风控”的核心改造：`llm-inference.ts` 将单模型调用超时提升到 360 秒、单股票专家投票总预算提升到 30 分钟，并取消“整轮超时即全部作废”的激进策略，改为优先保留已成功返回的 LLM 票，只对剩余未完成专家做规则降级补齐；仅当有效 LLM 票低于最低门槛时才整体退回规则推断。
+- `llm-extraction.ts` 修复 `sentiment_analyzer` 的 JSON 解析误判：情绪提取现在优先解析最外层对象，避免把对象内部的 `hotTopics` 数组误识别成整条响应，从而把合法 JSON 错误记成“解析异常”；同时将单 Agent fallback 总预算放宽到 15 分钟，适配当前响应较慢的模型链路。
+- `service.ts` 重做市场级流动性危机判断：不再允许 `volumePercentile < 0.10` 单指标直接一票否决，而是要求“缩量 + 普跌 + 悲观情绪”同时成立；仅有成交额分位偏低时改为低流动性护栏（最大仓位降到 0.65，并做轻微扣分），避免在大涨普涨日误判成流动性危机而错失机会。
+- 已补后端测试覆盖：新增 `llmExtraction.test.ts` 校验情绪对象解析与超时常量；`llmInference.test.ts` 校验超时常量；`stockAnalysisService.test.ts` 校验“普涨日不应触发流动性危机”和“低流动性护栏不应禁买”。
+- 修复一个会导致 `AI 炒股` 页面崩溃的严重前端问题：`frontend/src/apps/AIQuantApp.tsx` 之前直接在 `useNotificationStore` selector 里对 `state.notifications` 做 `filter().slice()`，每次渲染都会返回新数组；在通知状态变化后，这会放大为不稳定订阅并触发 React 渲染异常。现已改为只订阅原始 `notifications`，再用 `useMemo` 派生 `aiRiskNotifications`。
+- 根因结论：不是 AI 炒股业务逻辑本身坏了，而是通知系统改动后，AI 炒股页面里原本就存在的 store selector 不稳定问题被更频繁触发了。
+- 按用户反馈优化 `frontend/src/components/NotificationCenter.tsx`：通知中心悬浮面板从半透明毛玻璃改为纯白不透明面板，并把容器高度固定为稳定值，避免“只有 1 条通知时很矮、清空后反而变高”的跳变问题。
+- 在上述基础上继续微调通知中心观感：面板高度收敛为更紧凑的 `400px`，空状态改为居中的浅灰卡片式占位，少量通知与空列表之间的视觉落差更小。
+- 为了方便后续调样式，`frontend/src/components/NotificationCenter.tsx` 头部新增“测试通知”按钮：点击会生成一组 info/success/warning/error/critical/聚合示例通知，用于快速检查通知中心与 toast 的真实表现。
+- 设计取舍：通知中心属于高频系统面板，优先保证可读性和布局稳定性，弱化装饰性毛玻璃效果。
+- AI 炒股通知与确认交互继续往“实盘级”推进：
+  - `frontend/src/components/ToastProvider.tsx` 现对 `critical` 通知做了强提醒特判：无论全局设置是否自动消失，`level=error` 或 `metadata.riskPriority=critical` 的通知都会常驻，并使用红色强化样式与“高危”标签。
+  - `frontend/src/store/useNotificationStore.ts` 调整 toast 排序策略：`critical` 通知优先显示在顶部，避免被一般提醒挤掉。
+  - `frontend/src/apps/AIQuantApp.tsx` 将买入、平仓、减仓前的确认从原生 `window.confirm` 升级为自定义风险摘要确认面板；面板会显示执行动作、仓位/收益、组合风控阈值、市场趋势、波动状态和数据状态。
+- 设计取舍：高危通知强提醒和交易前风险摘要，优先覆盖“看漏风险”和“手滑误操作”这两类最直接影响真金白银的问题。
+- 验证结果：前端 `npm run build` 通过。
+- AI 炒股通知继续朝“实盘级”补强：
+  - 所有关键系统通知现在带 `metadata.riskPriority`（`critical/high/medium`）和 `metadata.category`（如 `risk`、`intraday`、`execution`、`data`、`analysis`、`monitor`），为后续筛选、高亮和专用视图做准备。
+  - `frontend/src/apps/AIQuantApp.tsx` 增加“关键通知历史”区域，直接读取系统通知 store 中 `appId === 'aiquant'` 且带风险元数据的最近记录，用于快速回看资金安全相关事件。
+  - 当前优先级约定：`止损/日亏限额/风控暂停/分析失败/交易执行失败` 归为 `critical`；`减仓/平仓/换仓建议/数据异常/监控失败` 归为 `high`；`一般恢复/状态变更` 归为 `medium`。
+- 设计取舍：先复用现有通知中心与全局 store，不新建一套 AI 炒股私有通知系统，避免多份状态源不一致；应用内只增加一个聚焦真金白银事件的“风险历史”视图。
+- 用户明确强调 AI 炒股通知要尽可能完善，因为会影响真金白银；本次继续把通知从“操作反馈”提升到“风险状态监控”。
+- `frontend/src/apps/AIQuantApp.tsx` 现已补齐以下高优先级通知，并全部采用“状态变化触发 + 去重/聚合”而非刷新即弹：
+  - **盘中预警**：轮询 `/intraday/alerts`，新出现且未确认的预警会触发系统通知；多条会聚合。
+  - **风控暂停/恢复**：`riskControl.paused` 从 false→true 或 true→false 时通知。
+  - **数据回退/恢复**：`systemStatus.dataState` 从 ready 进入 stale/empty，或从异常恢复到 ready 时通知。
+  - **换仓建议变化**：`swapSuggestions` 集合变化时通知，提示最强建议与总条数。
+- 现阶段 AI 炒股系统通知已覆盖三层：
+  - **执行层**：分析完成/失败、股票池刷新、信号处理、平仓、减仓、卖出提醒忽略、盘中监控启停。
+  - **风控层**：待处理卖出提醒、盘中预警、风控暂停/恢复。
+  - **数据可靠性层**：数据回退/恢复、分析失败。
+- 验证结果：前端 `npm run build` 再次通过。
+- 按用户要求继续补强 AI 炒股最关键的风控通知：`frontend/src/apps/AIQuantApp.tsx` 现在会基于 `overview.positions` 的 `action + actionReason` 做增量检测。
+- 只有当持仓**首次进入** `stop_loss / take_profit / reduce / review` 这类待处理状态，或同一持仓的提醒原因发生变化时，才会推送系统通知；普通刷新不会重复提醒。
+- 该通知继续走系统通知的聚合机制：若短时间内多只股票同时触发待卖出，会合并为摘要通知，避免风控场景下再次刷屏。
+- 继续完成通知系统第二轮优化，目标从“能用”提升到“更聪明、更克制、可配置”：
+  - `frontend/src/store/useNotificationStore.ts` 新增通知降噪能力，支持 `dedupeKey` 短时间去重和 `batchKey` 短窗口聚合；同类异常不再连续刷屏，多次失败会合并为摘要通知。
+  - `frontend/src/components/ToastProvider.tsx` + `frontend/src/lib/serverUiConfig.ts` + `backend/src/utils/serverConfig.ts` 已接入全局 `stickyNotifications` 配置；`App.tsx` 的系统设置“个性化”页新增“通知常驻显示”开关，允许用户选择 Toast 常驻还是自动消失。
+  - 下载管理与滴答清单的异常通知已升级为智能策略：下载失败类按操作类型聚合/去重，滴答的未授权/同步失败/任务/清单/标签/批量失败也按类型聚合/去重。
+  - `frontend/src/apps/AIQuantApp.tsx` 已接入系统级关键通知：今日分析、股票池刷新、盘后分析、盘中监控启停、信号处理、平仓、减仓、忽略卖出提醒，以及上述关键动作的失败路径。
+  - 设计取舍：AI 炒股只接“用户真正关心的关键动作和异常”，不把应用内每个局部 UI 状态都推到系统通知，避免再次制造噪音。
+  - 验证结果：前端 `npm run build` 通过，后端 `npm run build` 通过。
+- 按用户反馈对系统通知做了“降噪”收敛：下载管理与滴答清单从“成功/失败都通知”改为“仅关键失败/异常通知优先”，避免通知中心被高频操作刷屏。
+- 下载管理（`frontend/src/apps/DownloadApp.tsx`）已移除成功类系统通知（目录更新成功、暂停/恢复成功、删除成功、创建成功、清理成功），仅保留失败通知（目录更新失败、任务操作失败、删除失败、创建失败、清理失败）。
+- 滴答清单（`frontend/src/apps/DidaApp/store.tsx`）已移除成功类系统通知（任务/清单/标签/批量操作成功），仅保留核心异常通知（未授权、同步失败、各类操作失败）；其中新增了“创建清单失败”通知，补齐此前无提醒的失败路径。
+- 验证结果：前端 `npm run build` 通过；`npm test` 仍有与本次改动无关的既有 TypeScript 测试类型错误（`dashboardMeta.test.ts`、`musicViewCache.test.ts`）。
+
+### 2026-04-07
+- 彻查“通知完全不弹出”根因并确认：不是前端逻辑问题，而是**运行中的 systemd 后端进程仍是旧版本**（未加载新增 `/api/system/notifications` 路由），导致通知创建请求返回 404。
+- 证据链：
+  - 鉴权正常的接口（如 `/api/system/config/ui`）可访问；
+  - 通知接口在修复前返回 `{"success":false,"error":"Not Found"}`；
+  - 重启 `clawos.service` 后，同一通知接口立即返回成功并可查询到通知。
+- 已执行修复：`systemctl --user restart clawos.service`，并验证 `/api/system/notifications` 创建与查询链路正常。
+- 修复通知“操作成功但无弹窗”的核心问题：
+  - 原因：`EventSource` 无法附带 Basic Auth 头，SSE 在当前鉴权模型下可能无法建立，导致只依赖 SSE 时看不到推送。
+  - 处理：在 `frontend/src/store/useNotificationStore.ts` 增加两层兜底：
+    1) `notify()` 成功后本地立即注入 `notifications + activeToasts`（不再等待 SSE 回流）
+    2) 增加 6 秒轮询拉取后端通知列表，自动补齐未读和 Toast（SSE 失败时也可工作）
+  - 同步补齐本地 optimistic 更新：已读、全已读、删除、清空操作立即更新前端状态。
+- 按用户要求完成通知可用性联调（下载管理 + 滴答清单）：
+  - `frontend/src/apps/DownloadApp.tsx` 已接入 `createAppNotifier('downloads')`，在任务创建/暂停/恢复/删除/清理/目录更新的成功与失败路径均发送系统通知。
+  - `frontend/src/apps/DidaApp/store.tsx` 已接入 `createAppNotifier('dida')`，在任务/清单/标签/批量操作及同步异常时发送系统通知。
+  - 通知发送均采用“失败不阻塞业务”的保护策略：通知失败只写前端日志，不影响主流程。
+- 通知系统前后端联调完成（用户要求的 1/2/3 全部完成）：
+  - `frontend/src/store/useNotificationStore.ts` 已从纯前端内存状态切换为后端驱动：
+    - 首次加载走 `/api/system/notifications`
+    - 已读/全已读/删除/清空全部走后端 API
+    - 通过 `/api/system/notifications/stream` 建立 SSE 实时同步
+  - `ToastProvider` 与 `NotificationCenter` 已接入新 store，状态变更全部落到后端并全局同步。
+  - 新增前端统一通知 SDK：
+    - `frontend/src/lib/notifications.ts`（HTTP + SSE + notify）
+    - `frontend/src/apps/notify.ts`（`createAppNotifier(appId)` 应用级封装）
+  - 新增 `docs/notifications-api.md`，明确后端 API 与前端 SDK 使用方式，方便后续各应用接入。
+- 后端通知系统已落地：
+  - 新增 `backend/src/services/notifications/types.ts`，定义系统通知实体、创建参数、列表过滤和 SSE 事件载荷类型。
+  - 新增 `backend/src/services/notifications/store.ts`，将通知持久化到 `~/.clawos/notifications.json`，并做结构归一化、时间倒序和上限裁剪（500 条）。
+  - 新增 `backend/src/services/notifications/service.ts`，实现通知创建、查询、已读、全已读、删除、清空，以及 EventEmitter 实时事件分发。
+  - 新增 `backend/src/routes/notifications.ts` 与主路由挂载，开放统一接口 `/api/system/notifications`（含 `/stream` SSE）。
+  - 新增后端测试 `backend/tests/notificationsRoutes.test.ts`，覆盖通知 CRUD 流程与参数校验。
+  - 与现有回归测试对齐：修复 `server.ts` 登录设置 Cookie 的写法，兼容 `filebrowserAuthCookie` 既有测试断言。
+- 新增全局系统级通知功能 (Notification System)：
+  - 实现了 `useNotificationStore` (Zustand) 全局状态管理，提供 `notify` API 供任何应用调用。
+  - 实现了右上角 `ToastProvider` 悬浮弹窗，通知出现后 5 秒自动滑出，带有毛玻璃与系统图标设计。
+  - 实现了 `NotificationCenter` 任务栏弹出式通知中心，包含未读徽标、按时间分组（今天/昨天/更早）、标记已读与清除全部功能。
+  - 更新了 `App.tsx`，将通知中心入口集成到系统顶部右侧任务栏。
+
+### 2026-04-07
+- 用户确认本地音乐播放已经恢复正常，说明 `clawos_media_auth` Cookie 的媒体流鉴权修复已经在真实浏览器链路里生效。
+- 桌面 `系统状态` widget 仍有底部溢出，尤其是最下方内存/存储区域；已进一步将网络下载/上传区压缩为单行双列布局，优先给底部进度条区域让出垂直空间。
+- 用户继续反馈 `系统存储` 进度条仍有溢出，因此改为更激进的紧凑布局：直接移除 `系统状态` 卡标题区，只保留实时状态小标签与关键指标，并同步压缩卡片 padding、网络区和三条进度条的行高。
+- 用户指出 `实时` 标签嵌入位置破坏美观，因此继续回退这一视觉元素：移除状态标签，只保留紧凑的下载/上传与 CPU/内存/存储指标，优先保证整洁和不溢出。
+- 按用户要求将桌面滴答 widget 从信息看板重做为更接近官方滴答小组件的极简白卡：仅保留收集箱任务、顶部快速创建、简洁任务列表和“桌面直接勾选完成”。
+- `frontend/src/components/DesktopWidgets.tsx` 中滴答卡片已改为真实调用 Dida OpenAPI：桌面直接创建收集箱任务、直接 complete 任务，并继续保留进入完整 Dida 应用的入口。
+- 在上一版基础上继续做紧凑化微调：缩小标题区与按钮尺寸、压缩输入框与任务行 padding/字号，使双高 Dida widget 的单位信息密度更接近官方系统小组件。
+- 复用 `frontend/src/apps/DidaApp/naturalInput.ts` 的自然语言解析到桌面 widget，确保“快速创建”与主 Dida 应用在日期/时间/提醒识别规则上完全一致，避免两套输入行为分叉。
+- 为桌面 widget 的快速创建增加了轻量解析反馈：输入框下方显示已识别的时间片段和最终到期预览；同时修正 `naturalInput.ts`，让“今晚8点”这类表达按晚上 20:00 正确落库。
+- 网易云 `MusicApp` 增加了本地视图缓存（`musicViewCache.ts`）：进入应用时先回填上次的用户信息、歌单与歌曲列表，再后台刷新远端数据；刷新期间保留旧内容并显示轻量“刷新中...”状态，解决先空白后加载的跳变体验。
+- 将网易云缓存从“单一当前列表”升级为“按 tab 独立缓存歌曲列表”（`songsByTab`），搜索页和每个歌单页切换时都会立即回填各自页面的缓存内容，不再短暂显示上一个页面的歌曲列表。
+- 继续将网易云缓存细化为“按视图键隔离”（`songsByView`）：歌单使用 `playlist:<id>`，搜索使用 `search:<keyword>`，这样不同搜索关键词之间也不会串内容，切换体验更稳定。
+- 继续强化网易云体验：`musicViewCache.ts` 新增 `viewUpdatedAt`、`recentSearches`、`recentViewKeys`，`MusicApp` 现在会基于过期时间后台刷新、预热最近访问歌单、对搜索输入做防抖，并在搜索区展示最近搜索记录。
+- 已定位并修复浏览器内本地音频无法播放的根因：ClawOS 之前只给 `fetch` 注入 Basic Auth，请求 `<audio src>` 这类原生媒体资源时不会自动带认证头，导致 `/api/system/music/stream_local` 和 `/api/system/localmusic/stream/:id` 被后端拒绝。
+- 解决方案是在 `backend/src/server.ts` 中新增 `clawos_media_auth` Cookie，并允许该 Cookie 访问本地音乐流接口。登录验证成功后会同时下发 FileBrowser Cookie 和媒体流 Cookie。
+- 桌面 widgets 区完成新一轮重排：采用 `auto-rows-[160px]` 网格，新增双高 `滴答清单` 主卡片，展示待办总数、今日到期、逾期和重点任务列表，并支持直接打开 Dida 应用。
+- 为保持整体高度对齐，将原本分离的 `硬件状态` 和 `网络速率` 合并为单张 `系统状态` 卡片，同时移除了桌面 `灵感速记` 卡片，右侧信息层级更清晰。
+- 为将项目上传到 GitHub，补充了根目录 `.gitignore`，统一忽略 `node_modules`、前后端构建产物、运行日志、本地临时笔记数据以及 FileBrowser 本地二进制/数据库，避免把仅属于当前机器的运行时文件提交到仓库。
+- 新增根目录 `README.md`，补齐项目定位、功能概览、目录结构、开发/构建/部署方式，作为 GitHub 仓库首页说明。
+- 已初始化本地 Git 仓库，使用 `main` 作为默认分支，并同步到 GitHub 私有仓库 `ClawOS`。
+- 推送前额外清理了误纳入版本控制的本地 FileBrowser 安装包分片文件，避免仓库混入机器私有安装缓存。
+
+### 2026-04-07 (v1.27.1 — 修复 DidaIcon 样式与终极浅色横屏极简壁纸)
+- 重绘 DidaIcon 组件，使用纯 SVG path 完美还原原版滴答清单（Dida365）的断开蓝圆环与黄色大对勾样式。
+- 根据用户极简要求，删除了绝大部分系统壁纸。仅保留了最纯净、大面积留白、严格横屏 (16:9) 的 2 张极简浅色壁纸 (`clean-1.jpg`, `clean-6.jpg`)，搭配默认 SVG 背景，使得整个系统的预设壁纸数量缩减到 3 张，彻底解决挑选壁纸时导致视觉混乱的问题。
+
+### 2026-04-07 (v1.27.0 — 滴答官方 OpenAPI 接入修复与全链路打通)
+- **输入与分组体验修复**：
+  - `TaskList.tsx` 修复自然语言高亮输入时光标错位：预览层与输入层统一 `font/line-height/tracking/padding`，并移除高亮 token 的额外 `px`，避免输入光标提前偏移。
+  - 收集箱新增“没有日期”分组：无 `dueDate` 的任务归入该分组，不再落在“更远”。
+- **验证**：前端 build + 全量测试通过（92/92）。
+- **时间格式兼容补强（自然语言创建任务）**：
+  - 新增 `frontend/src/apps/DidaApp/date.ts`，统一处理 Dida `+0000` 时区字符串与 JS Date 解析差异。
+  - `api.ts` 在 create/update 时统一格式化 `startDate/dueDate`，并在 normalize 时标准化后再入前端状态，避免任务详情时间丢失。
+  - `TaskList/TaskItem/TaskDetail/TaskDatePicker/CalendarView` 改为复用统一日期解析函数，消除 `Invalid Date` 引发的显示异常。
+- **测试补充**：新增 `date.test.ts`，覆盖 `+0000 <-> +00:00` 与创建 payload 日期转换；前端 build + 全量测试通过（92/92）。
+- **根因排查完成（状态异常）**：
+  - `backend/src/routes/index.ts` 未挂载 `dida` 路由，前端请求 `/api/system/dida/*` 实际返回 404。
+  - `backend/src/server.ts` 全局 BasicAuth 拦截了 `/api/system/dida/callback`，导致 OAuth 授权回调无法换取 token。
+  - `backend/src/routes/dida.ts` 使用 `router.all('/proxy/*', ...)` 在 Express5 下触发 path-to-regexp 崩溃，服务反复重启。
+- **后端修复与重构**：
+  - `routes/index.ts` 挂载 `router.use('/dida', didaRoutes)`。
+  - `server.ts` 为 `/api/system/dida/callback` 与 `/clawos/api/system/dida/callback` 增加免鉴权白名单。
+  - `dida.ts` 按 OAuth2 规范重写：auth url、callback 换 token、status、logout、proxy、自动 refresh_token 续期。
+  - `didaAuth.ts` 增加 `refresh_token` 字段与过期判断 `isDidaAccessTokenExpired()`。
+  - `/proxy` 路由改为正则 `^/proxy/.+`，修复 Express5 崩溃问题。
+  - redirect_uri 支持 `/clawos` 子路径部署自动识别。
+- **前端 Dida 应用升级**：
+  - `DidaApp` 从 mock 数据改为真实后端数据流。
+  - `api.ts` 新增 DTO 归一化、全量加载（project + project/{id}/data）、create/update/delete/complete/reopen。
+  - `store.tsx` 重构为 `loading/ready/unauthorized/error` 状态机 + 乐观更新 + 回滚机制。
+  - `TaskList/TaskItem/TaskDetail/CalendarView` 全面改造为实时同步逻辑。
+  - 日期弹窗（时间/提醒/重复）继续保留并可同步到任务字段。
+- **验证结果**：
+  - 后端 build 通过，指定 6 组后端测试（含 timeout 命令）全部通过。
+  - 前端 build 与 84/84 测试通过。
+  - `clawos.service` 重启后 `active`，`/api/system/stock-analysis/overview` 返回 200 正常。
+  - 版本号升级到 `1.27.0`，CHANGELOG 已记录。
+
+### 2026-04-07 (v1.27.0 — 滴答前端全链路打通补全)
+- 用户完成 OAuth 授权后，继续补全 DidaLite 前端全链路交互与官方字段映射。
+- `frontend/src/apps/DidaApp/api.ts`：
+  - repeat 映射补全：`daily/weekly/monthly/yearly` <-> `RRULE:*`。
+  - reminder 映射补全：`0/-5m/-30m/-1h/-1d` <-> `TRIGGER:*`。
+  - 保留未知字符串透传，避免未来官方字段扩展导致数据丢失。
+- `frontend/src/apps/DidaApp/TaskList.tsx`：
+  - 视图过滤改为“先按视图过滤，再分 active/completed”。
+  - 新增“已完成任务”折叠区（显示/隐藏），更贴近滴答体验。
+  - inbox 项目不再硬编码 `inbox`，改为读取系统清单 id。
+- `frontend/src/apps/DidaApp/TaskDetail.tsx`：新增提醒/重复标签展示，便于确认弹窗保存结果。
+- `frontend/src/apps/DidaApp/TaskDatePicker.tsx`：重复选项文本微调为“每周”（去除非官方语义化文案偏差）。
+- 后端 `dida` 代理 endpoint 解析保留 query（修正为完整 slice），避免部分官方接口查询参数丢失。
+- 全量验证：
+  - 前端 build + 84/84 tests 通过
+  - 后端 build + 指定 6 组 tests 通过
+  - `clawos.service` 重启成功，`/api/system/stock-analysis/overview` 返回 200
+
+### 2026-04-07 (v1.27.0 — 滴答前端一口气补全核心功能)
+- 用户要求“一口气全部补全”，本次集中补齐 DidaLite 前端核心操作链路：
+  - `api.ts`：新增 project create/update/delete；task update 增加 status/sortOrder；repeat/reminder 官方字段映射完善。
+  - `store.tsx`：新增 `createProject/renameProject/deleteProject/reorderTasks/bulkCompleteTasks/bulkDeleteTasks/moveTasksToProject/renameTag/deleteTag`。
+  - `Sidebar.tsx`：清单新增/重命名/删除 UI；标签重命名/删除 UI。
+  - `TaskList.tsx`：多选模式 + 批量完成/删除/移动；拖拽排序并持久化；已完成任务折叠区。
+  - `TaskItem.tsx`：支持多选复选框和拖拽手柄。
+- 设计决策：
+  - 标签接口在 OpenAPI 层面不独立，采用“批量更新任务 tags”实现 rename/delete。
+  - 清单删除采用“任务回收到收集箱”策略，避免数据丢失。
+  - 拖拽排序只作用于当前视图 active 任务，排序写回 `sortOrder`。
+- 验证：
+  - 前端 build + 84/84 tests 通过
+  - 后端 build + 指定 6 组 tests 通过
+  - 服务重启成功，系统核心 API 健康
+
+### 2026-04-07 (v1.27.0 — P0 修复：已授权但无数据)
+- 现象：用户已完成 OAuth 授权，但 DidaLite 显示空数据。
+- 根因排查：
+  - `GET /open/v1/project` 返回 `[]`（官方接口表现），导致前端按项目遍历时无任何 `project/{id}/data` 请求。
+  - 实际账号任务存在于 `GET /open/v1/project/inbox/data`，此前未被纳入加载流程。
+- 修复：`frontend/src/apps/DidaApp/api.ts` 新增 `fetchInboxData()`，`loadAll()` 改为 `inbox data + project data` 合并加载，并动态注入真实 inbox projectId（如 `inbox1011358247`）。
+- 验证：
+  - 后端代理 `GET /api/system/dida/proxy/project/inbox/data` 已返回真实任务 JSON。
+  - 前端 build+tests 通过，后端 build+指定测试通过，服务重启与系统 API 健康。
+
+### 2026-04-07 (v1.26.0 — 全量本地化日志系统)
+- 完成 14 步日志系统实施计划（Step 1-14 全部完成）
+- 新增 `sa-logger.ts` 统一日志模块：按天分割业务日志 + LLM 调用 JSONL + 前端上报日志 + 审计日志 + 30 天自动清理
+- 修复 Winston logger 3 个问题：路径错位、无轮转(83MB)、debug 级别被丢弃
+- 后端 8 个模块全量日志覆盖：service/llm-inference/llm-extraction/data-agents/store/memory/scheduler（含所有 cron 任务）
+- 新增 `POST /api/system/stock-analysis/client-log` 前端日志上报 API
+- 新增前端 `logger.ts`（缓冲+批量上报+sendBeacon+全局错误捕获）+ `ErrorBoundary`（防白屏）
+- AIQuant `requestJson` 添加请求耗时/状态码/错误日志
+- 日志存储：业务日志 `stock-analysis-YYYY-MM-DD.log` / LLM `llm-calls-YYYY-MM-DD.jsonl` / 前端 `frontend-YYYY-MM-DD.log`
+- 全量 183 测试通过（后端 99 + 前端 84），前后端 build 通过，服务重启验证 API 正常
+
+### 2026-04-07 (v1.25.0 — P2 修复：投资准确性 + 稳定性)
+- 修复 20 个 P2 问题：13 个影响投资准确性 + 7 个影响断电/断网/长期运行稳定性
+- 投资类：compositeScore 去重、Kelly 实际盈亏比、neutral 纳入 consensus、confidence z-score 归一化、holdingDays 交易日、加权 cumulativeReturn、neutral 阈值收紧 0.5%、记忆衰减 0.8、Provider 熔断、extraction callLog 区分、AKShare 列名防御、buyCompositeScore 默认 65
+- 稳定类：withFileLock 队列模式、writeJson fsync、tmpPath 随机因子、trades/watch-logs 上限、scheduler 时区、trySource 重试
+- 全量 183 测试通过
+
+### 2026-04-07 (v1.24.0 — 全面复盘：3 P0 + 16 P1 修复)
+- 10 维度全面复盘审计，发现 P0×3 + P1×16 + P2×28 + P3×20+ 问题
+- P0-1: `todayDate()` UTC → Asia/Shanghai，修复凌晨日期错误
+- P0-2: 买入操作添加二次确认弹窗
+- P0-3: 交易操作加 `withFileLock` 互斥锁，串行写入，防止并发竞态
+- P1-1/2: previousTradeDate 和 FactPool 改用 `getRecentTradeDates()`
+- P1-3: 确认买入时基于实际价格重算止损止盈
+- P1-4: evaluatePositionScores 使用与 buildSignal 一致的调整后权重
+- P1-5: 确认买入新增极端熊市/流动性危机检查
+- P1-6: 确认买入新增 maxTotalPosition 检查
+- P1-7: 风控暂停自动恢复（条件不再满足时解除）
+- P1-8: 组合风控改用交易日窗口（1/5/22 交易日）
+- P1-9: LLM `<think>` 标签剥离 + reasoning_content 识别
+- P1-11: 关键文件损坏时自动备份
+- P1-12: service.ts runPythonJson 加 60s 超时
+- P1-13/14: bootstrap 检测残留 running 状态并重置 + 恢复盘中监控
+- P1-15: data-agents 11 处 Python except success:True → success:False
+- P1-16: 公告/新闻跨数据源按标题去重
+- types.ts 新增 `pause_lifted` 风控事件类型
+- 全量 183 测试通过，前后端 build 通过
+
+### 2026-04-07 (v1.25.1 — 东方财富 API 适配修复)
+- **根因**: 东方财富 `getNewsByColumns` API 新增 client/biz/column/req_trace 等必填参数，即使补齐仍返回空列表；`push2.eastmoney.com/api/qt/clist` 对全球指数/商品期货返回 SSL 错误或空数据
+- **政策法规 Eastmoney-news**: 替换为 `newsapi.eastmoney.com/kuaixun` JSONP 接口
+- **全球市场 Eastmoney-global**: 替换为 `push2his.eastmoney.com` 逐只查询（100.SPX/100.NDX/100.HSI）
+- **全球市场 Eastmoney-commodity**: 替换为 `push2his` 逐只查询（101.GC00Y/102.CL00Y）
+- **行业新闻 Eastmoney-industry**: 替换为 kuaixun JSONP column=104
+- **行业新闻 Eastmoney-research**: 替换为 `reportapi.eastmoney.com` 独立研报 API
+- **UA 升级**: 所有 HTTP 请求 UA 从简易字符串升级为完整浏览器 UA
+- 新增工具函数: `fetchEastmoneyKuaixun()`（JSONP 解析）、`fetchEastmoneyQuote()`（push2his 行情查询）
+- 183 测试通过，前后端 build 通过
+- **待卖出"忽略"按钮**: 止损/止盈/减仓/到期评估触发的"待处理卖出"新增忽略按钮，不受交易时间限制，忽略后下次行情刷新重新评估
+- **"已确认观望"文案修复**: `decisionSourceLabel()` 感知信号 action，观望信号确认后显示"已确认观望"而非"已确认买入"
+- **数据收集页面日期源修复**: `available-dates` 接口支持 `type=data-collection` 参数，扫描 `data-agents/` 而非 `signals/` 目录；`readFactPool()` 文件不存在时返回 null
+- **数据采集 Agent 修复**: Eastmoney 公告 API 嵌套结构解析、股吧 404 替换为同花顺+东方财富双备份、AKShare 汇率参数名修正、国债收益率曲线名+日期修正、央视新闻日期参数修正
+- **数据采集 fallback 增强**: 汇率三级 fallback、国债收益率双源、全球指数 HSI 补全、涨跌幅 validateNumericRange(-20,20) 校验、千股千评产出优化
+- 后端 99/99 + 前端 84/84 测试通过，双端 build 通过
+
+### 2026-04-07 (v1.22.0 — P2 全量清零，审计 53/55 修复)
+- **P2 全量修复(20个)**: 跨年日历预同步、启动竞态消除、AKShare 版本检测、数值合理性校验、DEFAULT_MAX_TOKENS 降至 8192、fallback 优先不同 provider、截断 JSON 逐元素恢复、prompt 数量一致、SentimentIndex ratio 归一化、AnnouncementEvent 全字段校验、观望 tPlus5Return=0 改为 pending、runtimeStatus 写入节流、buildExpertScoreFallback 钳位、.tmp 文件清理、路径参数校验、callMemoryLLM min 512 token、记忆存储 withFileLock 竞态保护、错误响应消毒、quantity 100 股对齐、前端 Overview 类型对齐后端
+- **审计总进度**: P0 9/9 + P1 16/18 + P2 28/28 = 53/55 已修复，1 项排除(故意设计)，1 项低优先级待定
+- 后端 99/99 + 前端 84/84 测试通过，双端 build 通过
+
+### 2026-04-07 (v1.21.0 — 全面代码审计修复 33 个问题)
+- **全面核查**: 对 10 个后端模块 + 路由层 + 前端 8 个文件逐行审计，发现 P0×9 + P1×18 + P2×28 + P3×25+ 个问题
+- **P0 全部修复(9个)**: confirm/reject 信号跨日期查找、盘中告警去重、Python 子进程超时、sp500 涨跌幅语义修正、API Key 泄露修复、SSRF 防护、代码注入防护、JSON 解析错误上下文
+- **P1 修复 16/17 个**: 权重归一化、compositeScore clamp 一致性、阈值持久化、runtimeStatus 原子写入锁、readJson 错误区分、记忆按天数截断、JSON 平衡匹配、note 长度限制、前端数量校验、IntradayAlert 枚举补全
+- **P2 修复 8/28 个**: 时区强制 Asia/Shanghai、整体超时 5 分钟、movingAverage60 除零防护、signals/market/daily-runs 目录清理、日志截断长度修正、MAX_ITERATIONS 提高
+- **剩余 21 个 P2 为低优先级**: 详见 `docs/STOCK-ANALYSIS-AUDIT-V1.21.md`
+- 后端 99/99 + 前端 84/84 测试通过，双端 build 通过
+
+### 2026-04-07 (v1.20.0 — 修复 20/30 LLM 专家主调用失败 + degradeRatio 误算)
+- **根因**: `callLLMOnce` 的 `max_tokens` 默认值 200000 超出阿里云 (65536 上限) 和智谱 (参数拒绝) 的 API 限制 → 13 个专家 HTTP 400。OpenCodeGo 网关 mimo-v2-pro 返回 500 → 5+1 个专家失败。合计 20/30 主调用失败。
+- **修复 1: max_tokens 默认值**: `llm-inference.ts` 和 `llm-extraction.ts` 统一改为 `provider.maxTokens ?? 50000`。
+- **修复 2: degradeRatio 区分**: `aggregateVotes` 现区分三类（LLM 主成功 / LLM fallback / 规则降级），`degradeRatio` 仅基于规则降级。`buildSignal` 降权逻辑同步适配。
+- **修复 3: Prompt 长度保护**: `buildExpertUserMessage` 增加 50000 字符上限；`callMemoryLLM` 增加 `Math.min(..., 4096)` 钳位。
+- **新增测试**: `llmInference.test.ts` 10 个测试（aggregateVotes 三类计数 + parseLLMResponse）。
+- **前端适配**: types.ts 新增 `llmFallbackCount`/`ruleFallbackCount`，StrategiesTab/ExpertAnalysisTab 展示优化。
+- **预期效果**: Aliyun qwen3.5-plus(5) + ZHIPU GLM-5(8) 恢复 → degradeRatio 从 ~70% → ~0%。
+- 后端 99/99 (10+35+3+6+1+44) + 前端 84/84 测试通过，双端 build 通过。
+
+### 2026-04-07 (v1.19.0 — 交易日历在线同步 + 启动自检 + 紧急修复清明假日误判)
+- **严重 bug 修复**: 2026 年节假日数据为早期预估值，4月7日（周二）被错误列入清明假日。依据国办发明电〔2025〕7号全面修正 6 处错误（清明/春节/五一假日 + 元旦/五一/国庆补班）。
+- **新增: 在线交易日历同步机制**:
+  - 通过 AKShare `tool_trade_date_hist_sina` 拉取在线数据，缓存到 `cache/trading-calendar-{year}.json`
+  - `isTradingDay` 改为双层数据源：在线缓存优先（工作日），静态数据兜底，补班日始终优先
+  - 与静态数据交叉校验，差异自动输出 ERROR 日志
+- **新增: 启动自检机制** (`validateAndSyncCalendarOnStartup`):
+  - 检查静态数据覆盖范围、当天日期逻辑一致性
+  - 磁盘缓存 >7 天自动刷新
+  - 不抛异常，确保不影响服务启动
+- **新增: 定期同步 cron**: 每天 07:30 检查过期；每月 1 日 06:00 强制刷新
+- **新增测试**: `tradingCalendar.test.ts` 35 个测试（静态数据完整性/isTradingDay/交易时段/在线同步/启动自检）
+- **注意**: AKShare 的 sina 数据源不含周末补班日，因此在线数据仅对工作日生效，补班日仍依赖静态 EXTRA_TRADING_DAYS。
+- 后端 89/89 (35+3+6+1+44) + 前端 84/84 测试通过，双端 build 通过，服务重启 + API 验证通过。
+
+### 2026-04-07 (v1.18.0 — 全量框架审计完成，44/44 问题全部修复)
+- **背景**: 延续上次会话的框架审计工作。上次已完成 H1-H7, MH1-MH2, M3-M14, L1-L12 共 35 项。本次完成剩余 9 项（L13-L21）。
+- **L13 文件增长清理**: `pruneOldDateFiles(dir, prefix, maxCount)` 通用函数，三处 save 函数调用。
+- **L14 原子写入**: `writeJson` 改为 temp+rename。
+- **L15 每日记忆清理**: `saveExpertDailyMemories` 调用 pruning。
+- **L16 内存 LLM fallback**: `callMemoryLLM()` 多供应商 fallback 链。
+- **L17 Agent 并行化**: `collectMacroEconomy` 4 路 `Promise.all`。
+- **L18 Python except:**: 全部 17 个 bare `except:` 改为 `except Exception as e`。
+- **L19 路由路径缓存**: 模块级缓存 + 5 分钟 TTL。
+- **L20 前端 Toast**: AIQuantApp.tsx 新增 Toast 队列系统（success/error/info），action 级错误改为 toast。
+- **L21 确认对话框**: 平仓/减仓添加 `window.confirm()` 二次确认。
+- **最终结果**: GAP-REPORT 44/44 = 100%。后端 54/54 + 前端 84/84 测试通过，双端 build 通过，服务重启 + API 验证通过。
+- **版本**: v1.17.0 → v1.18.0。CHANGELOG 已更新。
+
+### 2026-04-04 (v1.17.0 — 候选池缩减 + LLM 提取 Agent 独立模型配置)
+- **候选池 50→30**: `service.ts` 中 `.slice(0, 50)` 改为 `.slice(0, 30)`，减少 LLM 专家分析 token 消耗。
+- **LLM 提取 Agent 独立模型配置**: 3 个提取 Agent（公告解析/新闻影响/舆情情感）从共享单一模型改为 per-agent `assignedModel` + 自动 fallback。
+  - 后端 `llm-extraction.ts` 完全重写（~340 行），新增 `pickPrimaryCandidate`、`buildFallbackCandidates`、`callWithFallback`、`runAgentWithFallback`。
+  - 后端 `types.ts`/`store.ts`/`service.ts`/`routes` 扩展配置模型。
+  - 前端 `types.ts`/`api.ts`/`AIConfigTab.tsx` 新增 Section 5 UI 和 handler。
+- 后端 41/41 + 前端 84/84 测试通过，双端 build 通过，服务重启 + API 验证通过。
+
+### 2026-04-04 (v1.16.0 — AI 专家分析 + AI 数据收集审计页面)
+- **目标**: 新增两个审计/复盘页面，让用户能明文查看每日 45 位 AI 专家的投票明细和 8 个数据采集 Agent 的 FactPool 内容，防止异常（如某天未执行）。
+- **后端 3 个新 API**:
+  - `GET /available-dates` — 扫描 `signals/` 目录返回可用日期列表。
+  - `GET /expert-analysis?date=` — 返回指定日期的信号（含所有投票明细）+ 专家记忆库 + 当日记忆条目。
+  - `GET /data-collection?date=` — 返回指定日期的 FactPool + LLM 提取结果。
+- **前端 ExpertAnalysisTab** (~350 行): 日期选择器、信号列表（可展开查看按层分组的投票明细）、亮点/风险、专家记忆库（短/中/长期三层展开）、当日记忆条目表格。
+- **前端 DataCollectionTab** (~555 行): 日期选择器、Agent 执行摘要卡片、可折叠的 FactPool 各维度面板（宏观/政策/公告/新闻/情绪/全球/质量）、LLM 提取结果（调用日志/公告事件/新闻影响/情绪指数）。
+- **修复**: `types.ts` 中 `DataAgentResult` 接口重复定义导致 `agentId` 类型冲突。
+- **关键代码位置**:
+  - 后端 `routes/stock-analysis.ts`: available-dates/expert-analysis/data-collection 3 个新路由
+  - 前端 `ExpertAnalysisTab.tsx`: 新文件
+  - 前端 `DataCollectionTab.tsx`: 新文件
+  - 前端 `shared.tsx:8`: Tab 类型扩展
+  - 前端 `AIQuantApp.tsx`: 侧边栏入口 + 渲染 + 2 个新 icon (MagnifyingGlassIcon, CircleStackIcon)
+  - 前端 `types.ts`: ~200 行新类型定义 (FactPool, LLM Extraction, Expert Memory 等)
+  - 前端 `api.ts`: 3 个新 API 函数
+- 后端 41/41 + 前端 84/84 测试通过，双端 build 通过，服务重启 + API 验证通过。
+
+### 2026-04-04 (v1.15.0 — 信号操作锁 + 交易时间限制 + 买入实时报价)
+- **Fix 1: 信号操作状态锁定**: 后端 `confirmStockAnalysisSignal()` 和 `rejectStockAnalysisSignal()` 新增 `decisionSource !== 'system'` 前置检查，已操作信号不可重复操作。前端已操作信号替换操作按钮为状态横幅 + 侧边栏操作状态徽章。新增 `decisionSourceLabel()` 工具函数。
+- **Fix 2: 交易时间限制**: 新建 `trading-calendar.ts` 共享模块（CHINA_MARKET_HOLIDAYS 2025-2027、isTradingDay、isWithinTradingHours、checkTradingAvailability、getRecentTradeDates）。买入/平仓/减仓操作在非交易时间被阻止，非交易操作不受限。新增 `GET /trading-status` API。前端 StrategiesTab/RiskTab 集成交易状态，禁用按钮 + 琥珀色提示。`memory.ts` 重构为导入共享模块。
+- **Fix 3: 买入使用实时报价**: `confirmStockAnalysisSignal()` 在用户未指定价格时通过 `getQuoteData()` 获取实时报价，失败时降级使用 `signal.latestPrice`。
+- **版本/CHANGELOG**: 版本号 bump 到 1.15.0，CHANGELOG 已更新。
+- 后端 41/41 + 前端 84/84 测试通过，双端 build 通过，服务重启 + API 验证通过。
+
+### 2026-04-04 (v1.14.0 — 策略页面交互逻辑重设计)
+- **背景**: 上次会话完成了 UI 布局优化（总览看板3列、策略页左右70/30、持仓风控左右50/50）。本次实施策略页面交互逻辑的 4 部分重设计。
+- **Part 1: 后端 confirm 逻辑按信号类型分支**
+  - `service.ts` 的 `confirmStockAnalysisSignal()` 新增信号类型判断：watch/none + 无 quantity 时只标记 `decisionSource`，不创建持仓（返回 `{ confirmed: true, position: null }`）；buy/strong_buy 保持原有流程；watch/none + 有 quantity 时视为用户推翻，`sourceDecision` 标记为 `'user_override'`。
+  - `routes/stock-analysis.ts` 放宽 quantity 校验，不再强制 `> 0`。
+  - `types.ts` 的 `DecisionSource` 新增 `'user_override'` 值。
+- **Part 2: 前端按信号类型分化操作按钮**
+  - `ActionMode` 扩展为 6 种：`confirm | reject | ignore | acknowledge | override_buy | null`。
+  - strong_buy/buy: 「确认买入」+「放弃买入」+「忽略」
+  - watch: 「确认观望」+「我要买入」+「忽略」
+  - none: 「已阅」+「我要买入」
+  - `confirm`/`override_buy` 展开买入表单（数量/价格/仓位）+ 可选备注；`acknowledge` 显示蓝色提示文字；`reject`/`ignore` 显示必填备注。
+- **Part 3: 前端按信号类型差异化信息展示**
+  - watch/none 信号隐藏仓位/止盈/止损行，仅显示现价 + 支撑/压力位。
+  - strong_buy/buy 信号完整显示所有交易参数。
+- **Part 4: 策略页面顶部新增「待处理卖出」区域**
+  - 左侧详情面板顶部条件渲染红色卖出卡片区，数据源复用 `buildDailyAdviceSummary().sells`。
+  - 每个卡片显示股票名/代码、触发原因、当前盈亏、「减半」和「平仓」按钮。
+  - `StrategiesTabProps` 新增 `onClosePosition`/`onReducePosition`，`AIQuantApp` 传入已有的 `submitPositionClose`/`submitPositionReduce`。
+- **验证**: 后端 41/41 + 前端 84/84 测试通过，双端 build 通过，服务重启 + API 验证通过。
+
+### 2026-04-04 (v1.13.0 — 真实性审计修复: 10 项问题全部清零)
+- **背景**: 对 AI 炒股分析系统进行了全面真实性审计，发现 10 个问题（3 P0 + 4 P1 + 3 P2），涉及硬编码假数据、数据未赋值、分类始终默认、节假日缺失等。本次会话修复了剩余 9 项（P0-3 已在上次会话修复）。
+- **P0-1 完成**: 4 处硬编码 bull/bear ratio 替换为 `computeBullBearRatio()`。
+- **P0-2**: `evaluatePositionScores` 改为 async，有 AI 配置时调用 `runExpertVoting()` 获取真实 LLM 评分。日常运行传完整参数（aiConfig + weights + profile + factPool + memory），盘后运行加载 aiConfig 传入，Overview 不调 LLM。测试 3 个 async 化。
+- **P1-4**: AKShare 全球数据 sp500/nasdaq 赋值修复。
+- **P1-5**: 全球市场 Agent 新增 `AKShare-us10y` 数据源（美国10Y国债收益率）。
+- **P1-6**: 新增 3 个分类函数 + 替换 14 处硬编码分类。
+- **P1-7**: `CHINA_MARKET_HOLIDAYS` 静态表（2025-2027）+ 回溯上限 count*3。
+- **P2-8/9/10**: 删除死代码、修正命名、消除重复URL。
+- 后端 41/41 + 前端 84/84 测试通过，双端 build 通过，服务重启 + API 验证通过。
+
+### 2026-04-04 (v1.12.0 — 专家记忆系统 + Agent 配置 UI + 按钮提示)
+- **Task A: 专家 AI 记忆系统**（`memory.ts`，~719 行新文件）：
+  - 三层记忆：短期 5 日 / 中期 30 日 LLM 压缩 / 长期教训。维度按专家（per-expert）。Token 上限 80k。
+  - FactPool 摘要注入 `buildExpertUserMessage`，专家画像注入 `buildExpertSystemMessage`。
+  - 盘后分析 Phase 7 自动调用 `runDailyMemoryUpdate`。
+  - `llm-inference.ts` 5 个函数扩展签名（profile/factPool/memory 参数）。
+  - `service.ts` Phase 5.5 加载记忆/画像/摘要，`buildSignal` 签名扩展。
+  - 31 个新测试全通过。
+- **Task B: 数据采集 Agent 配置 UI**：
+  - 后端 GET/PUT `/data-agent-config` API + `data-agents.ts` collectAllAgents 接受配置参数。
+  - 前端 AIConfigTab.tsx Section 4：8 个 Agent 卡片（开关 + 超时输入）+ 保存按钮。
+- **Task C: 工具栏按钮 Tooltips**：4 个按钮加 `title` 属性。
+- 后端 41/41 测试通过，前端 84/84 测试通过，双端 build 通过，服务重启 + API 验证通过。
+
+### 2026-04-04 (差距报告最终审计 — v1.11.0)
+- **完成 gap report 最终逐项审计**，对 `docs/STOCK-ANALYSIS-GAP-REPORT.md` 全部 24 项差距进行代码级验证。
+- **审计结果**：23/24 已完成，1 项（G6 资金管理）用户主动暂缓。0 项未完成。
+- **验证方法**：通过 4 个并行 explore agent 搜索后端 service.ts、data-agents.ts、llm-extraction.ts、scheduler.ts、routes、前端 api.ts、DashboardTab.tsx 等文件，逐项确认函数定义、cron 配置、类型定义、前端组件均存在且非 stub。
+- **gap report 已重写为"最终审计版"**，每项标注 ✅/⏸️ + 实现版本 + 代码位置，删除原有的修复路线图（已全部完成），新增最终总结表。
+- **结论**：设计文档 v2.0 规划的所有功能（除用户暂缓的 G6）均已落地，AI 炒股分析系统 v1.11.0 功能完整。
+
+### 2026-04-04 (Wave 2-4 完成 + 前端 UI 完善 — v1.11.0)
+- **Wave 2-4 全部完成**，实现 G1 双循环、S1 盘中监控、G3 数据采集、G3+M3 LLM 抽取、G7 事件驱动选股。
+- **G1: 盘后分析**（`runStockAnalysisPostMarket`）：6 阶段流程（刷新行情→持仓评估→风控检查→数据采集→LLM 抽取→持久化），16:00 cron 自动触发 + 手动 API。
+- **S1: 盘中实时监控**：60 秒轮询，检查 4 种告警条件（止损/止盈1/止盈2/最大持仓天数），09:25 自动启动、15:05 自动停止。6 个新 API 端点。
+- **G3: 八大数据采集 Agent**（`data-agents.ts`）：每个 Agent 5 个备用数据源，7 个并行采集汇入 FactPool。
+- **G3+M3: LLM 抽取层**（`llm-extraction.ts`）：3 个并行抽取 Agent（公告/新闻/情绪），AI 未配置时 graceful fallback。
+- **G7: 事件驱动选股**：读取前日 LLM 抽取结果，正面公告和利好新闻的股票自动加入候选池。
+- **前端 UI 完善**：
+  - `AIQuantApp.tsx` 顶部工具栏新增"盘中监控"（绿色/红色切换）和"盘后分析"按钮。
+  - `DashboardTab.tsx` 新增盘中告警横幅（30 秒轮询，红色卡片，逐条确认）、盘中监控徽章（系统状态栏旁）、postMarketAt 和盘中监控详情（系统状态折叠区）。
+  - `IntradayAlertBanner`、`IntradayMonitorBadge` 两个新内部组件。
+- **Overview API 扩展**：`systemStatus` 新增 `intradayMonitor` 摘要字段（state/lastPollAt/pollCount/activeAlertCount/startedAt）。
+- 后端 10/10，前端 84/84，build 通过。服务重启后 API 返回新字段正常。
+
+### 2026-04-04 (S2+S3 自动报告 + 通知系统 — v1.10.0)
+- **Wave 1 全部完成**：M7 支撑/阻力位、市场级风控（前一会话）+ S2+S3 自动报告与通知系统（本会话）。
+- **S2: 自动周报**：每周五 16:00 cron 触发 `generateWeeklyReport()`，复用 `buildWeeklySummary()` + `buildPerformanceDashboard()`，生成带交易统计、模型组排名、策略预警的周报摘要。
+- **S3: 自动月报**：月末最后交易日 16:30 cron 触发 `generateMonthlyReport()`，包含完整月度统计 + `generateTuningSuggestions()` 7 条规则引擎（胜率阈值、保守策略、模型弱势、观望比率、止损频率、Conviction Filter 通过率、综合评分）+ markdown 叙事报告 `buildMonthlyNarrative()`。
+- **通知系统**：`AutoReportNotification` 类型，store 层 CRUD（上限 100 条），overview API 返回最近 10 条未读通知，前端 `NotificationBanner` 组件在 Dashboard 顶部展示带类型标签的通知横幅，支持已读确认后乐观更新 UI。
+- **5 个新 API 端点**：`GET /notifications`、`POST /notifications/:id/acknowledge`、`GET /monthly-reports`、`POST /reports/generate-weekly`、`POST /reports/generate-monthly`。
+- **Bug 修复**：`t.reason` → `t.note`（`StockAnalysisTradeRecord` 无 `reason` 字段）。
+- 后端 10/10，前端 84/84，build 通过。服务重启后手动触发周报成功，通知创建/确认 API 验证通过。
+
+### 2026-04-04 (Phase 3 专家表现追踪系统 — v1.9.0)
+- **Phase 3 全部完成**，基于 `docs/STOCK-ANALYSIS-GAP-REPORT.md` 中 G5 + G4 + S9 三项实施。
+- **G5: 专家个体表现追踪**：
+  - 新增类型 `ExpertPerformanceEntry` / `ExpertOutcome` / `ExpertPerformanceData`（backend types.ts + frontend types.ts）。
+  - 新增持久化 `readStockAnalysisExpertPerformance()` / `saveStockAnalysisExpertPerformance()`（store.ts）。
+  - 新增 `updateExpertPerformance()` 函数，平仓时自动评估每位专家预测正确性并更新 winRate/calibration/weight。
+  - 新增 `computeExpertWeight()` 函数：`baseWeight = 1 + (winRate - 0.5) * 2`，60 天半衰期衰减，钳位 [0.1, 2.0]，最少 5 次预测后生效。
+  - `closeStockAnalysisPosition()` 中以 fire-and-forget 方式异步调用（不阻塞平仓响应）。
+- **G4: 专家权重融入投票聚合**：
+  - `aggregateVotes()` 每票贡献 = `expertWeight * confidence`（原来仅 `confidence`）。
+  - `runExpertVoting()` → `buildSignal()` 传递 `expertWeights` Map。
+  - `runStockAnalysisDaily()` 信号生成前加载 expert performance，构建权重 Map。
+- **S9: 动态权重衰减**：60 天半衰期自然衰减内置于 `computeExpertWeight()`。
+- **G5-4: 模型组真实 winRate**：`buildModelGroupPerformance()` 从 expert performance 按 modelId 聚合真实 winRate/calibration/weight（原硬编码 0）。
+- **G5-5: Overview 返回 expertPerformance**：`getStockAnalysisOverview()` 的 Promise.all 新增加载，返回对象新增 `expertPerformance` 字段。
+- 后端 10/10，前端 84/84，build 通过。服务已重启，API 返回 `expertPerformance` 字段正常。
+
+### 2026-04-04 (Phase 2 补充功能 — v1.8.5)
+- **Phase 2 全部完成**，基于 `docs/STOCK-ANALYSIS-GAP-REPORT.md` 差距分析报告实施。
+- **S4: 黑名单集成**：`runStockAnalysisDaily()` 候选阶段读取 `blacklist.json` 生成 Set，在 `.filter()` 链中排除黑名单股票。日志新增 `黑名单排除=N`。
+- **S5: 持仓满跳过 LLM**：当 `positions >= maxPositions` 时，新信号使用 `null` aiConfig（fallback 评分），节省 LLM 调用。信号仍生成以支持换仓比较。
+- **S6: 次新股过滤**：历史 K 线 `< 60` 条直接跳过（原为 `< 30`）。
+- **S7: 停牌股过滤**：在获取历史前检查 `quote.open <= 0 || quote.turnoverRate <= 0`。
+- **M8: 减仓功能**：后端 `reduceStockAnalysisPosition()` + 路由 `POST /positions/:id/reduce` + 前端 API + handler + UI "减半"按钮（100 股整数倍对齐）。
+- **M5: 自动复盘验证**：确认 `buildReviewRecord()` 已在 `closeStockAnalysisPosition()` 中自动调用，无需额外修改。
+- 后端 10/10，前端 84/84，build 通过。服务已重启，API 正常。
+
+### 2026-04-04 (BUG-1 平仓 pnl=0% 修复 + BUG-2 多源 K 线 fallback — v1.8.4)
+- **Phase 1 Bug Fixing 完成**，两个关键 bug 均已修复并验证。
+- **BUG-1 (pnl=0%)**：`closeStockAnalysisPosition()` 在 `request.price` 缺失时主动获取实时行情。注意：4/3 的 3 笔平仓（000537/000155/000062）pnl 仍为 0%，推测是当天建仓即平仓（价格未变），需后续有真实持仓盈亏时再验证。
+- **BUG-2 (候选=0)**：实现 6 级 K 线数据源 fallback 链（同花顺→搜狐→东方财富→新浪→腾讯→本地缓存），解决腾讯源无成交额导致 500 只股票全部被过滤的问题。
+- **数据源测试结论**：东方财富 TLS 不兼容（OpenSSL 3.5.x）、网易 502、百度/凤凰/和讯无响应。同花顺 JSONP 最稳定，作为主力源。
+- **验证**：daily run 成功 `candidates=39, signals=39`，筛选漏斗 `成交额不足=0`（修复前=500）。
+- **Gap 分析报告**已保存到 `docs/STOCK-ANALYSIS-GAP-REPORT.md`，含 7 大 + 6 中 + 9 小共 22 个差距项。
+- **修复路线图**已与用户确认：Phase 1 ✅ → Phase 2 (S4,S5,S6+S7,M8,M5) → Phase 3 → Phase 4 → Phase 5。
+- 后端 10/10，前端 84/84，build 通过。CHANGELOG 已更新至 v1.8.4。
+
+### 2026-04-04 (LLM Fallback 机制 + OpenCodeGo 接入 + 思考模式优先分配 — v1.8.3)
+- **目标**：接入 OpenCodeGo provider，实现 LLM 调用 fallback 兜底机制，按思考模式优先均匀分配专家。
+- **OpenCodeGo 验证**：4 个模型（kimi-k2.5, glm-5, mimo-v2-pro, minimax-m2.7）全部连通，延迟 1-2s。baseUrl 需要是 `/v1` 结尾（代码自动拼接 `/chat/completions`）。
+- **思考模式测试结果**：
+  - 支持思考：OpenCodeGo/kimi-k2.5, OpenCodeGo/glm-5, OpenCodeGo/mimo-v2-pro, ZHIPU/GLM-5, Aliyun/glm-5, Aliyun/qwen3.5-plus（6 个）
+  - 不支持思考：Aliyun/kimi-k2.5, OpenCodeGo/minimax-m2.7（2 个，低优先级分配）
+- **Fallback 机制实现**（`llm-inference.ts`）：
+  - 新增 `LLMCandidate` 接口、`callLLMOnce()` 底层调用、`callExpertLLMWithFallback()` 带重试逻辑
+  - 新增 `buildFallbackCandidates()` 构建备选模型池
+  - `runLLMByProvider()` 重命名为 `runLLMWithFallback()`，集成 fallback + 全局并发上限 `MAX_GLOBAL_CONCURRENCY=8`
+- **专家分配**：28/30 思考模型，2/30 非思考模型（各 1 个），通过直接修改 `ai-config.json` 完成。
+- **ZHIPU baseUrl 修复**：从 `api.z.ai/api/paas/v4/` 改为 `api.z.ai/api/coding/paas/v4`（Coding Plan 端点）。
+- **max_tokens 提升**：512 → 200000（用户要求利用百万级上下文窗口）。
+- 后端 10/10，前端 84/84，build 通过，服务重启 API 正常。
+- Daily run 触发成功但 candidates=0（凌晨行情数据过滤导致，非代码问题）。
+
+### 2026-04-03 (LLM 调用可靠性修复 + Per-Provider 并发 — v1.8.2)
+- **目标**：修复首轮真实分析中 93.3% LLM 调用降级到规则引擎的问题。
+- **根因诊断**：
+  1. glm-5/qwen3.5-plus 超时（thinking 模式下 37-52s，旧超时仅 20s）。
+  2. kimi-k2.5 因 `response_format: { type: "json_object" }` 不兼容导致输出截断（仅 8 tokens）。
+  3. system message 使用硬编码通用消息而非专家的 systemPrompt。
+- **修复**：timeout 90s, 移除 response_format, max_tokens 512, 拆分 buildExpertSystemMessage/UserMessage, 保留深度思考。
+- **新增 per-provider concurrency**：`StockAnalysisAIProvider` 新增 `concurrency` 字段，`runLLMByProvider()` 按 provider 分组并发，旧配置自动补丁默认值 3。
+- **前端**：AIConfigTab ProviderEditor 新增"最大并发数"输入框。
+- **验证结果**：kimi-k2.5 100%、glm-5(Aliyun) 100%、qwen3.5-plus 94.3%。GLM-5(ZHIPU) 0%——独立 provider 配置问题，非代码 bug。
+- **关键代码位置**：
+  - `llm-inference.ts`: `buildExpertSystemMessage()` L197, `buildExpertUserMessage()` L220, `LLM_CALL_TIMEOUT_MS=90000` L253, `runLLMByProvider()` L520
+  - `service.ts`: auto-patch concurrency L3027
+  - `routes/stock-analysis.ts`: tempProvider 加 concurrency L307
+  - Frontend `types.ts:501`: concurrency field
+  - Frontend `AIConfigTab.tsx:48-77`: ProviderFormData/formToProvider 含 concurrency, L115 grid-cols-3 并发输入框
+- 后端 10/10，前端 84/84，build 通过，服务重启 API 正常。
+
+### 2026-04-03 (Prompt 系统重构 — v1.8.1)
+- **目标**：将 45 个同质化 LLM 专家（layer prompt + stance guide 拼接，最多 27 种唯一 prompt）重构为 30 个独立人格专家，每人拥有唯一 systemPrompt。
+- **types.ts**：`StockAnalysisExpertDefinition` 新增 `systemPrompt: string`，`frameworkPrompt` 标记 `@deprecated`。
+- **service.ts**：
+  - `LAYER_META` 简化为 name + expertCount（新分布 3+4+3+3+3+3+4+3+4+15=45）。
+  - 新增 `LLM_EXPERT_SEEDS` 数组（30 个 `ExpertSeed`），每个包含 name/layer/stance/infoSubset/systemPrompt。
+  - `buildDefaultExperts()` 重写为从 seeds 生成 30 LLM + 15 rule。
+  - `getStockAnalysisAIConfig()` 新增 v1→v2 迁移逻辑：检测旧配置（无 systemPrompt 或 version < 2），替换为新专家但保留按层的模型分配。
+  - 新增 `updateExpertSystemPrompt()` 函数。
+- **llm-inference.ts**：
+  - `buildStockContext()` 新增 `infoSubset?: string[]` 参数，按 7 个数据维度（basic/price/momentum/ma/volume/volatility/market）+ technical 别名分区过滤。
+  - `buildExpertPrompt()` 优先使用 `expert.systemPrompt`，为空时回退到旧版 `LAYER_PROMPTS + STANCE_GUIDE`。
+- **routes/stock-analysis.ts**：新增 `PUT /ai-config/experts/:id/system-prompt` 路由。
+- **前端**：
+  - `types.ts` 新增 `systemPrompt` 字段。
+  - `api.ts` 新增 `updateExpertSystemPrompt()` 函数。
+  - `AIConfigTab.tsx`：`LayerAssignmentRow` 展开区新增 infoSubset 标签、systemPrompt 查看/编辑（textarea + 保存按钮）。
+- **验证**：后端 10/10，前端 84/84，build 通过，服务重启 API 正常，迁移成功（v2, 30 LLM, 模型分配保留）。
+
+### 2026-04-03 (LLM 专家投票系统接入 — v1.8.0)
+- **目标**：将 45 个 LLM 专家评分从数学公式模拟替换为真实 AI 推理调用，接入阿里云百炼 API。
+- **Phase 1 (已完成)**：创建 `llm-inference.ts` — 封装 prompt 构造、API 调用、JSON 解析、降级逻辑。
+- **Phase 2 (已完成)**：将 `llm-inference.ts` 接入 `service.ts`：
+  - `buildExpertScore()` 重命名为 `buildExpertScoreFallback()`，仅作降级方案。
+  - `buildSignal()` 改为 async，新增可选 `aiConfig` 参数。有 AI 配置时调用 `runExpertVoting()`，失败或无配置时 fallback。
+  - `runStockAnalysisDaily()` 中读取 AI config，通过 `runLimitedConcurrency(candidatePool, 3, ...)` 限流并行生成信号。
+- **Phase 3 (已完成)**：`buildDefaultModelGroupPerformance()` 替换为 `buildModelGroupPerformance()`，按真实投票数据的 modelId 聚合，不再返回伪造的 GPT/Claude/Gemini 数据。
+- **Phase 4 (已完成)**：前端"模拟"警告改为动态条件显示（StrategiesTab/MemoryTab/GuideTab）。
+- **类型变更**：`StockAnalysisExpertScore` 扩展了 `votes`/`llmSuccessCount`/`fallbackCount`/`isSimulated`；`StockAnalysisModelGroupPerformance.group` 从字面量联合改为 `string`。
+- **验证**：后端 10/10，前端 84/84，build 通过，服务重启 API 正常。
+
+### 2026-04-03 (数据源优先级修复 — v1.7.3)
+- **根因**：Ubuntu 25.10 的 OpenSSL 3.5.x 与东方财富 `push2/push2his` TLS 不兼容，所有请求失败。
+- **修复**：3 个数据获取函数（指数历史/实时行情/个股K线）全部改为腾讯优先、东方财富备用、本地缓存兜底。
+- **修复 fallback 语义**：在线源成功获取新鲜数据时 `usedFallback: false`，只有真正回退到本地过期缓存才为 `true`。旧代码中腾讯成功仍标记 `usedFallback: true` 导致前端永远显示"使用回退数据"。
+- **代码改动**：`service.ts` 的 `fetchCsi500IndexHistoryFresh()`、`getQuoteData()`、`getStockHistoryData()` 三处；测试文件 `stockAnalysisService.test.ts` 更新断言。
+- **验证**：后端 10/10，前端 84/84，build 通过，API 返回 `usedFallbackData: false, staleReasons: []`。
+- **下一步**：接入真实 LLM 集群（当前专家评分仍为公式模拟）。
+
+### 2026-04-03 (全 7 Tab 多列布局重构 — v1.7.2)
+- 完成 `AI 炒股` 前端全部 7 个 Tab 的多列布局重构，目标：从 1-2 列升级为 3 列，充分利用 3440x1440 宽屏。
+- **RiskTab**：顶部 `grid-cols-2` + 全宽摘要条 → `grid-cols-3`（事前+系统+组合概况），子面板 `p-4` → `p-3`，底部 `gap-4` → `gap-3`。
+- **MemoryTab**：`space-y-4` → `space-y-3`，`p-4` → `p-3`，`gap-4` → `gap-3`。
+- **ProfileTab**：`grid-cols-2` → `grid-cols-3`（画像+建议+阶段），底部面板 `grid-cols-2` 并排，`space-y-6/p-5/gap-6` → `space-y-3/p-3/gap-3`。
+- **AIConfigTab**：`space-y-8` → `space-y-3`，供应商 `grid-cols-2` 并排，section 间距压缩。
+- **GuideTab**：移除 `max-w-4xl`，使用指南 `grid-cols-2` 双列，表格+免责全宽。
+- 前端 build 通过，84/84 测试通过；服务重启 API 验证通过。
+
+### 2026-04-03 (UI 布局优化 + 系统说明页 — v1.7.1)
+- 完成 `AI 炒股` 前端 UI 布局优化，目标：减少页面滚动、利用横向空间、压缩卡片间距。
+- **DashboardTab**：统计+市场状态合并为单卡；信号列表改 inline flex；系统能力说明移至独立页签。
+- **StrategiesTab**：4 StatCard→单行信息条+市场体制合并；详情/评分/操作全面紧凑。
+- **RiskTab**：事前+系统面板并排；MiniPanel→单行汇总条；时间线+事后并排；事中持仓 flex-wrap。
+- **MemoryTab**：月度+交易并排；月度水平 flex；周报/观望/模型组减距。
+- **新增 GuideTab.tsx**（~220行）：侧边栏"AI 配置"下方新增"系统说明"页签，内含：
+  - 系统能力说明（已实现 vs 尚未接入，从 DashboardTab 迁移）
+  - 完整使用指南：应用介绍、每日流程、核心概念、风控机制、各页面功能表、数据说明、新手建议、免责声明
+- `shared.tsx` Tab 类型新增 `'guide'`。
+- `DashboardTab.tsx` 移除 `showCapabilities` state 和系统能力说明折叠面板。
+- `StatCard` 不再被 StrategiesTab 引用，`MiniPanel` 不再被 RiskTab 引用，但两者仍保留在 shared.tsx。
+- 关键文件：
+  - `frontend/src/apps/AIQuant/components/GuideTab.tsx` — 新文件
+  - `frontend/src/apps/AIQuant/components/shared.tsx:8` — Tab 类型扩展
+  - `frontend/src/apps/AIQuantApp.tsx:181-182` — 侧边栏入口 + 渲染
+  - `frontend/src/apps/AIQuant/components/DashboardTab.tsx` — 移除系统能力说明
+- 前端 build 通过，84/84 测试通过；服务重启 API 验证通过。
+
+### 2026-04-03 (Phase 5 — v1.7.0)
+- 完成 `AI 炒股` 迭代 Phase 5（v1.7.0）— AI 专家集群配置系统：
+  - **三层配置架构**：供应商管理 → 模型池 → 分析层批量分配，用户选择方案 A（直连云端 LLM API）。
+  - **后端配置持久化**：`config/ai-config.json`，自动初始化 60 位默认专家（45 LLM + 15 规则函数，分布于 10 个分析层）。
+  - **后端 5 个 API 端点**：GET ai-config、PUT providers、POST layer assign、POST expert assign、POST test-model。
+  - **后端业务逻辑**：`buildDefaultExperts()` / `buildDefaultLayerAssignments()` / `buildModelPool()` / `testModelConnectivity()` / `getStockAnalysisAIConfig()` / `saveStockAnalysisAIProviders()` / `assignModelToLayer()` / `assignModelToExpert()`。
+  - **types.ts 新增 8 个类型**：`StockAnalysisAIProvider`、`StockAnalysisAIModelRef`、`StockAnalysisExpertLayer`、`StockAnalysisExpertStance`、`StockAnalysisExpertDefinition`、`StockAnalysisLayerAssignment`、`StockAnalysisAIConfig`、`StockAnalysisModelTestResult`。
+  - **store.ts 新增**：`readStockAnalysisAIConfig()` / `saveStockAnalysisAIConfig()`，路径 `config/ai-config.json`。
+  - **前端 AIConfigTab**：三层配置面板——供应商编辑器（含连通性测试）、模型池概览、分析层下拉分配 + 展开查看专家。
+  - **前端集成**：`shared.tsx` Tab 类型扩展 `'aiconfig'`、`AIQuantApp.tsx` 新增侧边栏入口和渲染。
+  - **关键代码位置**：
+    - 后端 `service.ts`: `LAYER_META` ~2600, `buildDefaultExperts()` ~2630, `getStockAnalysisAIConfig()` ~2680, `testModelConnectivity()` ~2760
+    - 后端 `types.ts`: Phase 5 类型 ~593-672
+    - 后端 `store.ts`: AI config 读写 ~451-478
+    - 后端 `routes/stock-analysis.ts`: AI Config 路由 ~224-303
+    - 前端 `AIConfigTab.tsx`: ~350 行新组件
+    - 前端 `api.ts`: 5 个 AI Config API 函数 ~95-140
+    - 前端 `types.ts`: Phase 5 类型 ~493-590
+  - 后端 10/10 测试通过，前端 84/84 测试通过，build 通过，服务重启 API 验证通过。
+  - **下一步**：Phase 5 已完成基础配置层。全部 5 个迭代阶段的基础设施均已落地。后续可进一步实现：真实 LLM 调用链路（专家 prompt 生成、结果解析、投票聚合）、专家 prompt 模板编辑器、运行日志查看。
+
+### 2026-04-03 (Phase 4 — v1.6.0)
+- 完成 `AI 炒股` 迭代 Phase 4（v1.6.0）— 自我进化层：学习权重 + 阈值自适应 + 四维复盘：
+  - **Phase 4.1 专家权重学习**：
+    - `computeLearnedWeights()` 基于复盘记录计算维度准确性（指数衰减半衰期 30 天），生成零和调整因子（max ±20%）。
+    - `getAdjustedFusionWeights()` 将学习调整叠加到体制基准权重，归一化确保总和为 1。
+    - `buildSignal()` 新增可选 `learnedWeights` 参数，每日分析时传入实际学习权重。
+    - 持久化路径：`experts/weights.json`。
+  - **Phase 4.2 Conviction Filter 阈值自适应**：
+    - `adjustConvictionThresholds()` 基于最近 20 笔交易胜率自动调整 `minCompositeScore`（>60%→-2分，<40%→+3分，floor 60 ceil 85）。
+    - 持久化路径：`config/threshold-history.json`，上限 100 条。
+  - **Phase 4.3 四维复盘自动化**：
+    - `buildDimensionAnalysis()` 在每笔卖出交易后生成：专家（预测 vs 实际）、技术（买入分 vs 目标达成）、量化（动量方向）、执行（滑点/效率/遵循计划）。
+    - `buildReviewRecord()` 增强为自动调用维度分析，附加到 `dimensionAnalysis` 字段。
+  - **每日分析集成**：`runStockAnalysisDaily()` 在信号生成前调 `computeLearnedWeights()`，生成后调 `adjustConvictionThresholds()`。
+  - **Overview API**：新增 `learnedWeights` 和 `thresholdHistory` 字段；融合权重改为经学习调整后的实际值。
+  - **前端**：types 同步 5 个新类型；ProfileTab 新增学习权重面板和阈值调整面板；系统阶段标签增加 Phase 4 三项。
+  - **store 层**：新增 `readStockAnalysisLearnedWeights/saveStockAnalysisLearnedWeights` 和 `readStockAnalysisThresholdHistory/saveStockAnalysisThresholdHistory`。
+  - **关键代码位置**：
+    - `service.ts`: `computeLearnedWeights()` ~line 1474, `getAdjustedFusionWeights()` ~line 1550, `adjustConvictionThresholds()` ~line 1576, `buildDimensionAnalysis()` ~line 1410
+    - `store.ts`: learned weights 读写 ~line 420, threshold history 读写 ~line 435
+    - `types.ts`: `StockAnalysisDimensionAnalysis` ~line 491, `StockAnalysisLearnedWeights` ~line 518, `StockAnalysisThresholdAdjustment` ~line 551
+    - `ProfileTab.tsx`: `LearnedWeightsPanel` + `ThresholdHistoryPanel` 组件
+  - 后端 10/10 测试通过，前端 84/84 测试通过，build 通过，服务重启 API 验证通过。
+  - **下一步**：Phase 5 — AI 能力接入（需与用户讨论方案 A/B/C 选择）。
+
+### 2026-04-03 (Phase 3.2)
+- 完成 `AI 炒股` 迭代 Phase 3.2（v1.5.5）— 风控 Tab 四层面板 + 事件时间线：
+  - **后端风控事件系统**：
+    - `types.ts` 新增 `StockAnalysisRiskEventType`（9 种事件）和 `StockAnalysisRiskEvent` 接口。
+    - `store.ts` 新增 `risk-events.json` 的读写函数，上限 200 条。
+    - `assessPortfolioRisk()` 重构为返回 `{ state, newEvents }`，自动检测状态跳变生成事件。
+    - `confirmStockAnalysisSignal()` 否决时发射 veto 事件（3 种）。
+    - Overview API 新增 `riskEvents`（最近 50 条）和 `riskLimits`（阈值配置）。
+  - **前端类型同步**：`types.ts` 新增 `StockAnalysisRiskEventType`、`StockAnalysisRiskEvent`，Overview 增加 `riskEvents?` 和 `riskLimits?`。
+  - **utils 扩展**：`riskEventTypeLabel()` 和 `riskEventTypeBadge()` 两个工具函数。
+  - **RiskTab 全面重写**（~310 行）：
+    - 事前面板：三项否决条件（仓位/暂停/阈值）的实时状态。
+    - 事中面板：卡片化持仓监控，含成本/现价/仓位/天数、止盈止损移动止损状态条、实时评分变化、AI 建议。
+    - 系统级面板：从 `riskLimits` 动态读取阈值（不再硬编码）。
+    - 事后面板：复盘摘要含盈亏统计。
+    - 风控事件时间线：竖线+圆点布局，按时间倒序展示，含类型标签/原因/指标快照。
+  - **关键代码位置**：
+    - 后端 `service.ts`: `assessPortfolioRisk()` ~line 1232 返回 `{ state, newEvents }`
+    - 后端 `store.ts`: `readStockAnalysisRiskEvents()` / `saveStockAnalysisRiskEvents()` ~line 405
+    - 后端 `types.ts`: `StockAnalysisRiskEventType` ~line 486, `StockAnalysisRiskEvent` ~line 497
+    - 前端 `RiskTab.tsx`: ~310 行全新文件
+    - 前端 `utils.ts`: `riskEventTypeLabel()` / `riskEventTypeBadge()` ~line 132-162
+  - 后端 10/10 测试通过，前端 84/84 测试通过，build 通过，服务重启 API 验证通过。
+- 下一步：Phase 4 (v1.6.0) — 学习迭代机制。
+
+### 2026-04-03 (Phase 3.1)
+- 完成 `AI 炒股` 迭代 Phase 3.1（v1.5.4）— 绩效图表可视化：
+  - **纯 SVG 图表组件**：新建 `MiniChart.tsx`（339 行），包含 `MiniLineChart`（折线图，支持面积填充、零线、自适应坐标轴）和 `MiniBarChart`（柱状图，支持红涨绿跌双色）。不依赖第三方图表库。
+  - **图表数据准备**：`dashboardMeta.ts` 新增 4 个函数——`buildCumulativeReturnChartData()`、`buildDrawdownChartData()`、`buildWinRateChartData()`、`buildWeeklyReturnChartData()`，从周报（时间倒序）转换为图表所需的时间正序数据。
+  - **MemoryTab 集成**：在"周度绩效仪表板"和"模型组表现追踪"之间展示 2×2 布局的绩效图表——累计收益（靛蓝）、最大回撤（红色）、胜率趋势（翠绿）、每周收益（红绿柱状）。周报 < 2 周时不显示。
+  - **测试**：`dashboardMeta.test.ts` 新增 6 个测试（共 14 个），覆盖多周正序、空数据、单周边界。前端全部 84 测试通过，build 通过，服务重启 API 验证通过。
+- 下一步：Phase 3.2 (v1.5.5) — Risk Tab 四层风控面板增强。
+
+### 2026-04-03 (Phase 2.3)
+- 完成 `AI 炒股` 迭代 Phase 2.3（v1.5.3）— 持仓主动评估 + 卖出信号生成 + 换仓逻辑：
+  - **持仓评估**：新增 `evaluatePositionScores()` 函数，每日分析时对持仓股票重新运行三流评分，计算与买入时的评分差值。综合评分下降 ≥15 分触发 `score_drop`；专家共识 < 0.4 且技术破位触发 `expert_bearish`。
+  - **换仓建议**：新增 `buildSwapSuggestions()` 函数，持仓满且新信号评分 > 最弱持仓评分 + 10 时生成换仓建议。
+  - **流程集成**：`runStockAnalysisDaily()` 和 `getStockAnalysisOverview()` 均已集成持仓评估和换仓逻辑。
+  - **前端适配**：`buildDailyAdviceSummary()` 重写为三层卖出信号（被动/主动/换仓），DashboardTab 新增紫色换仓区，"系统能力说明"更新。
+  - **新增类型**：`PositionSellReason`、`StockAnalysisPositionEvaluation`、`StockAnalysisSwapSuggestion`。
+  - **关键代码位置**：
+    - `service.ts`: `evaluatePositionScores()` ~line 1358, `buildSwapSuggestions()` ~line 1420, `_testing` export ~line 2280
+    - `types.ts`: 新类型 ~line 422-470
+    - `dashboardMeta.ts`: `buildDailyAdviceSummary()` 重写，含去重逻辑
+  - 后端 build 通过，6/6 新测试 + 4/4 现有测试通过。前端 build 通过，78/78 测试通过。服务重启 API 验证通过。
+- 下一步：Phase 3.1 (v1.5.4) — 绩效图表。
+
+### 2026-04-03 (Phase 2.2)
+- 完成 `AI 炒股` 迭代 Phase 2.2（v1.5.2）— 四层风控体系：
+  - **移动止损**：在 `updatePositionRuntime()` 中实现，浮盈 >=3% 激活，从最高价回撤 >=2% 触发止损。优先级高于固定止盈。
+  - **买入前否决**：`confirmStockAnalysisSignal()` 新增持仓上限、黑名单、风控暂停三重校验。
+  - **组合级风控**：`assessPortfolioRisk()` 函数计算日/周/月亏损和最大回撤，与 `portfolioRiskLimits` 对比。月度亏损或最大回撤超限自动暂停交易。
+  - **交易复盘**：`buildReviewRecord()` 在平仓时自动生成，包含买入三流评分、体制、卖出原因、经验教训。持久化到 `journal/reviews.json`。
+  - **Overview 增强**：返回 `systemStatus.riskControl` 和 `recentReviews`。
+  - **前端 RiskTab 重写**：四层结构——个股监控（含移动止损提示）、仓位/回撤/建议面板、组合级风控进度条、交易复盘列表。
+  - **新增类型**：`StockAnalysisRiskControlState`、`StockAnalysisTrailingStopConfig`、`StockAnalysisPortfolioRiskLimits`、`StockAnalysisReviewRecord`。
+  - **新增 store 函数**：blacklist/reviews 的 CRUD。
+  - **关键代码位置**：
+    - `service.ts`: `assessPortfolioRisk()` ~line 1230, `buildReviewRecord()` ~line 1290, trailing stop in `updatePositionRuntime()` ~line 1175, veto in `confirmStockAnalysisSignal()` ~line 1920
+    - `store.ts`: blacklist/reviews read/write at end of file (~line 385-404)
+    - `types.ts`: risk control types at end of file (~line 395-442)
+  - 前端 56/56 测试通过，后端 build 通过，测试 4/4 通过，服务重启 API 验证通过。
+- 下一步：Phase 2.3 (v1.5.3) — 卖出信号生成 + 换仓逻辑。
+- 完成 `AI 炒股` 迭代 Phase 2.1（v1.5.1）— 动态三流融合权重：
+  - **新增 `MarketRegime` 5 态体制**：从 `MarketState` 的趋势 + 波动率两维度推导，替代原来仅按趋势区分的 3 态。优先级：牛市趋势 > 熊市趋势 > 高波动 > 低波动震荡 > 常规震荡。
+  - **`fusionWeightsByRegime` 配置表**：每种体制下专家/技术/量化三流权重不同，存于 `strategy.json`，可由用户调整。
+  - **`marketThresholds` 扩展为 5 态**：每种体制有独立入场门槛。
+  - **`buildSignal()` 重写**：不再硬编码 0.35/0.35/0.30，改为查表获取动态权重。信号输出新增 `marketRegime` 和 `fusionWeights` 字段。
+  - **Overview 新增**：顶层返回 `marketRegime` 和 `fusionWeights`。
+  - **前端展示**：策略页新增体制+权重概览条，信号详情区新增权重和体制行。
+  - **向后兼容**：`readStockAnalysisConfig` 自动合并旧 config 缺失的新字段。前端新字段均为 optional。
+  - **关键代码位置**：
+    - `service.ts` 新增 `getMarketRegime()` / `getFusionWeights()` 在 `getThresholds` 附近
+    - `store.ts` DEFAULT_CONFIG 在 line 39-67 附近
+    - `types.ts` 新增 `MarketRegime` (line 3) 和 `StockAnalysisFusionWeights`
+  - 前端 56/56 测试通过，后端 build 通过，相关测试 4/4 通过，服务重启 API 验证通过。
+- 下一步：Phase 2.2 (v1.5.2) — 风控系统完善。
+
+### 2026-04-03
+- 完成 `AI 炒股` 迭代 Phase 1（v1.5.0），包含三个子任务：
+  - **Phase 1.1 诚实标签**：在记忆复盘页模型组表现上方新增"模拟数据"警告横幅；策略页三流评分区新增专家共识免责说明；总览页新增"系统能力说明"面板区分已实现与尚未接入功能。
+  - **Phase 1.2 仪表盘信息层级重构**："今日操作建议"提升至首屏；4 张 StatCard 压缩为单行信息条；9 宫格市场状态压缩为 2 行标签；系统运行状态改为默认折叠。
+  - **Phase 1.3 代码拆分**：将 1097 行 `AIQuantApp.tsx` 拆为 `utils.ts`、`shared.tsx`、`DashboardTab.tsx`、`StrategiesTab.tsx`、`RiskTab.tsx`、`MemoryTab.tsx`、`ProfileTab.tsx` 共 8 个文件，主文件约 210 行。
+- 前端 build 通过、56/56 测试通过；后端 build 通过、测试通过。已重启 clawos.service 并验证 API 正常。
+- 下一步：Phase 2（后端功能 — 动态权重、风控、卖出信号），对应迭代计划 v1.5.1-v1.5.3。
+
+### 2026-04-02
+- 已完成一轮“多信源降级”落地，目标是把单点上游故障从“可能打断 daily run”降为“可降级继续运行”。当前后端链路为：
+  - 指数历史：东方财富 -> 腾讯指数日线 -> AKShare -> 本地缓存 -> 简化市场状态
+  - 实时行情：东方财富 -> 腾讯实时 -> 本地缓存
+  - 个股历史：东方财富 -> 腾讯复权日线 -> 本地缓存
+- 新增的腾讯备源是无 key、可直接在线拉取的公开接口，适合当前“先保可用性”的阶段目标；同时保留了原有 AKShare 与缓存兜底，避免仅依赖单一备用源。
+- 新增后端测试覆盖“东方财富失效时自动切腾讯并继续完成 daily run”，并验证 `staleReasons` 会记录具体降级来源，前端可据此提示用户数据状态。
+- 已继续按用户要求推进到“后端全量补齐”阶段：`AI 炒股` 后端现已不只输出基础 signal/position，而是新增并落盘文档 v2.0 对应的追踪层数据（观望日志 T+1/T+5、观望 outcome、月度汇总、性能仪表板、预警与调参建议），前端已改为优先读取这些真实后端字段。
+- 关键实现点：1) `watch-logs` 增加后验评估字段并在 daily run 自动更新；2) `weekly-summary` 补上盈亏比/回撤计算；3) 新增 `monthly-summary` 与 `performance-dashboard` 文件；4) `overview` 一次性返回四表追踪 + 仪表板所需数据，避免前端再拼装伪统计。
+- 当前状态：展示层与追踪层已基本对齐文档，剩余差距主要是“专家层更细粒度真实统计”和“更完整月度报告文本”这类还需要后续持续积累样本的数据，不再是接口结构缺失。
+- 已基于用户提供的 `AI集群预测股市完整框架 v2.0` 对 `AI 炒股` 前端做了一轮需求回对与补全。当前前端已不只是“显示 signal 列表”，而是明确补齐了四块文档核心视图：1) 今日操作建议（卖出/买入/观望 + Conviction Filter 统计）；2) 四表追踪的主要展示入口（交易记录、观望日志、周度汇总、模型组表现）；3) 周度绩效仪表板（胜率/盈亏比/回撤/观望准确率/最佳最差模型组/调参建议）；4) 行为画像（执行率/推翻率/忽略率/纪律分）。
+- 这一轮仍遵守最小改动原则，没有为了“像文档”而新增一整套假后端；前端缺少的字段优先由现有 overview 数据派生，无法真实追踪的部分继续显式保留 `模拟统计` 标签，避免把不存在的真实能力伪装成已落地。
+- 继续补强 `AI 炒股` 的稳定性短板：指数历史链路不再只依赖 AKShare。后端现已改成优先直接请求东方财富 `push2his` 指数 K 线，再失败才退回 AKShare，最后才落到本地缓存或简化市场状态。这样减少了一次 AKShare 内部“先拉指数代码映射再拉 K 线”的额外上游依赖，目标是把当前 `usedFallbackData: true` 的常态进一步压低。
+- 新增后端 `tests/stockAnalysisService.test.ts`，锁定两条关键链路：1) 直连指数历史成功时不应再调用 AKShare 指数历史脚本；2) 东方财富与 AKShare 都失败时，仍应平稳回退到本地指数历史缓存并保持整轮 `daily run` 成功。
+- 已将 `AI 炒股` 从纯前端原型升级为真实产品骨架：新增 `backend/src/routes/stock-analysis.ts` 与 `backend/src/services/stock-analysis/`，接入 `/api/system/stock-analysis/*` 系列接口。
+- 已新增服务端路径配置 `stockAnalysisDir`，默认目录为 `/home/chriswong/文档/AI炒股分析`，用于保存策略配置、股票池缓存、市场状态、每日信号、持仓、交易记录、观望日志、周报和模型组表现。
+- 实现了真实中证500股票池方案：通过 Python/AKShare 子进程读取 `000905` 成分股，再由 TypeScript 服务层调用东方财富接口抓取实时行情与个股历史 K 线，完成市场状态检测、股票池初筛、技术分、量化分、专家共识近似分和 Conviction Filter。
+- `AIQuantApp.tsx` 已重写为真实数据驱动页面，五个 tab 现在都展示后端真实状态：总览看板、每日策略、持仓风控、记忆复盘、行为画像。用户可直接确认信号、推翻/忽略建议并写回原因，也可手动平仓记录交易。
+- 已新增 AI 炒股专用调度器：服务启动后 10 秒做一次 bootstrap，工作日 `08:05` 自动运行一次盘前分析；测试环境中不会注册该调度器。
+- 已补充后端 `stockAnalysisRoutes.test.ts` 与前端 `src/apps/AIQuant/api.test.ts` 回归测试，并修正历史 `probe.test.ts` 中过期的 `direct-access` 断言。前端测试与前后端 build 已通过；后端全量测试在本地跑到超时前未再出现失败条目。
+- 已完成一轮稳定化改造：`overview/signals` 改为只读最近一次成功快照，不再在读取接口里触发全量重算。现在系统优先保证“宁可旧，不可挂”。
+- 为 `AI 炒股` 新增本地缓存与降级链路：股票池、实时行情、指数历史和个股 K 线都已有缓存文件与 TTL；当上游失败时，会自动回退到缓存，并在 `runtime-status/health` 和前端状态条里直接展示 `dataState/staleReasons/isUsingFallback/currentRun`。
+- 修正了一批真实可用性问题：信号确认/推翻/忽略现在按原始 `tradeDate` 写回；`stockPoolRefreshedAt` 不再被每日分析误覆盖；交易记录新增 `pnlPercent`，后续统计不再依赖备注文案正则猜收益。
+
+### 2026-04-01
+- Reader 列表卡片已改为更紧凑的密度：中栏卡片不再显示摘要段落，只保留标题和最小元信息，便于在同一屏看到更多文章。
+- `OpenClaw资讯` 顶部操作区现与 `今日简报` 部分对齐，但只保留 `刷新`，不显示 `拉取最新订阅`，因为 OpenClaw 视图只处理本地投递内容。
+- Reader UI 已进一步收敛：去掉左上角“刷新会扫描本地 inbox/pending...”说明文案，同时移除 `OpenClaw资讯` 顶部的三个状态卡片，保留更干净的文章列表视图。已重新构建并在真实页面验证生效。
+- 已修复 Reader 的真实使用痛点：`inbox/pending` 不再只靠每天 `07:55` 定时任务或人工点击“刷新”才能导入。现在后端启动后 15 秒会先自动扫一次，之后每 60 秒后台轮询一次 `pending`，OpenClaw 新投递文件会自动进 `processed`。
+- 已完成一次真实回归验证：手动投递 `2026-04-02-02-01-auto-refresh-proof.json` 到 `inbox/pending` 后，无需任何人工操作，文件在一分钟内自动被 Reader 导入并移入 `processed`。
+- 已重新构建并重启当前生产进程 `node dist/server.js`，确认线上实际页面已经显示 `OpenClaw资讯`、`刷新`、`拉取最新订阅` 以及 `RSS/OpenClaw` 来源标识。此前用户看不到新 UI 的根因是源码修改后没有同步更新运行中的 `frontend/dist`/`backend/dist`。
+- `OpenClaw资讯` 视图继续补强为排查入口：`overview` 里新增 `inboxStatus`，前端会直接显示 pending / processed / failed 的数量和最近文件名，方便快速定位“投递到了但没刷新”还是“刷新后导入失败”。
+- 默认 Reader 预设源中，已确认失效的 `Anthropic Blog` 和 `Reuters Business` 已被替换为实测可用的 `Google DeepMind Blog` 与 `MarketWatch Top Stories`，本机 `feeds.json` 也同步更新，减少拉取订阅时的噪音报错。
+- OpenClaw 的完整 Prompt 模板已强化为“必须真实抓取”：明确禁止 `example.com`、示例资讯、测试文章、模拟数据和虚构来源；如果抓不到就少报，不能编造。
+- Reader 现已把来源筛选真正打通到后端和前端：`GET /api/system/reader/articles` 支持 `?source=openclaw|rss`，前端新增 `OpenClaw资讯` 独立入口，专门查看本地投递内容，不再只能和 RSS 混排。
+- 文章卡片与详情页现在都会显示来源徽标，便于直接判断一条资讯来自 `OpenClaw 投递` 还是 `RSS 订阅`。
+- Reader 的“立即同步资讯”现已拆成两个明确动作：`刷新` 只扫描本地 `RSS资讯/inbox/pending` 并导入 OpenClaw 等本地投递内容；`拉取最新订阅` 只抓 RSS。前端顶部已新增 `刷新` 按钮，空状态指引也同步改成“先刷新本地，再按需拉订阅”。
+- 后端新增 `POST /api/system/reader/refresh` 与 `POST /api/system/reader/pull`，保留旧 `sync` 作为兼容全量动作；调度器也重新对齐为 `07:55` 拉取 + 刷新、`08:00` 仅重建简报。
+- 关于 `RSS资讯/feeds/` 里出现大量 2026 年之前的日期目录，已确认不是异常目录结构，而是当前 Reader 用 `publishedAt.slice(0, 10)` 作为落盘路径，所以一旦某个 RSS 源回吐历史文章（如 OpenAI Blog 2016 年文章），就会按文章原始发布日期写入对应年份目录；同一条记录里的 `fetchedAt` 仍能看出它其实是 2026 年才抓到的。
+- 修复了 `每日简报` 今日列表滚动分页的回归：拖到列表底部触发下一页加载时，旧实现会把整个中栏替换成全屏“加载中...”，导致滚动容器高度塌缩后自动跳回顶部。前端现已拆分 `loadingArticles` 与 `loadingMoreArticles`，仅在首屏切换视图时显示整体 loading，分页追加时只保留底部提示，不再丢失当前位置。
+- 重新核对了本机 Reader 订阅源配置：当前 `RSS资讯/config/feeds.json` 实际启用数仍是 16 个，不是显示误差。分类分布为 AI 5、科技 5、财经 3、新闻 2、游戏 1；当前没有自定义源，全部都是 preset。
+- 对前端做了最小回归验证：`frontend npm test` 通过（56/56），本次改动未引入新的前端测试失败。
+- 新增并实测通过了一批中文订阅源后，Reader 预设源已从 16 个扩充到 21 个。新增来源为：游戏 `游戏茶馆`、`游戏陀螺`；财经 `FT中文网`；新闻 `纽约时报中文网`、`RFI 中文`。这些源都已在当前环境下验证能返回标准 RSS/XML。
+- 同步更新了本机运行配置 `RSS资讯/config/feeds.json`，所以当前机器上的 Reader 不需要等下一次自动合并 preset，订阅管理里会直接看到新增来源。新的分类分布变为 AI 5、科技 5、财经 4、新闻 5、游戏 3。
+- 已将原 `RSS订阅` 应用重构为 `每日简报`。前端默认首页改成“今日简报”，新增五大领域浏览、稍后阅读、订阅管理和本地资讯详情阅读布局，不再直接围绕单个 feed 原文阅读组织界面。
+- 后端 Reader 已拆成服务层 `backend/src/services/reader/`：包含预设订阅源、本地文件存储、规则分类、OpenClaw inbox 导入、每日简报生成与稍后阅读持久化。
+- 资讯目录从 `RSS咨询` 更名为 `RSS资讯`，已建立 `inbox/pending|processed|failed`、`feeds/`、`briefs/`、`config/`、`read-later/`、`cache/`、`assets/` 结构，并新增 `readerDir` 服务端路径配置默认值。
+- 新增 `docs/rss-openclaw-ingest-spec.md`，约定 OpenClaw 后续定时资讯任务必须写入 `version=1.0 / source=openclaw / items[]` 的 JSON 文件到 `RSS资讯/inbox/pending/`，由 ClawOS 自动导入。
+- 新增 `docs/openclaw-daily-brief-task-template.md` 和 `docs/examples/openclaw-reader-payload.example.json`，同时在本地 `RSS资讯/config/` 放好了 `OPENCLAW_TASK_TEMPLATE.md` 与 `openclaw-payload.example.json`，后续可直接给 OpenClaw 任务照抄。
+- Reader 空状态已改成接入引导面板：首次打开时直接告诉用户投递目录、样例文件、模板文档和“立即同步资讯”入口，减少第一次接入的理解成本。
+- Reader 后端调度器现在只在真实服务启动时初始化：`07:55` 自动抓取/导入资讯，`08:00` 自动生成每日简报；测试环境不注册调度器，避免测试进程被挂住。
+- 修复了 `每日简报` 两个首轮交互 bug：
+  - 点资讯卡片会跳回顶部，根因是“标记已读”后又全量刷新 overview，现已改为局部状态更新。
+  - 点五大领域偶发黑页，根因是历史 RSS 数据中的 `author` 字段有时是对象，现已在后端导入与读取时统一规范成字符串。
+- `每日简报` 现已增加英文资讯的“全文翻译”按钮：后端通过读取 `~/.openclaw/agents/main/agent/models.json` 里的当前 `modelstudio` 配置，直接调用兼容 OpenAI 的 `chat/completions` 翻译全文，并把译文持久化到文章记录中。
+- `每日简报` 已进一步升级为真正的“当天全量列表 + 滚动分页加载”：前端中栏默认按当天文章全量分页查询，每次 30 条，滚动到底部自动继续加载。为避免误解，UI 现在明确区分“今日收录总数”和“当前已加载条数”。
+- Reader 的摘要已不再只依赖规则生成：新增后端 AI 摘要接口，直接复用 OpenClaw 当前模型配置生成 3 条中文摘要，结果持久化到文章记录的 `aiSummary` 字段，详情与列表优先显示 AI 摘要。
+- 左侧“今日统计”卡片已删除，只保留同步状态和“清理 Reader 运行数据”入口，避免噪音信息。
+- 为拟真测试新增了 `DELETE /api/system/reader/runtime-data`，当前已经执行过一次清理：`feeds/`、`briefs/`、`read-later/`、`cache/` 以及 `inbox/processed|failed` 已清空，但 `config/feeds.json`、OpenClaw 模板和目录结构仍保留。
+- Reader 预设订阅源现为 16 个：AI/科技/财经/新闻/游戏五大领域都已有至少 2-4 个来源，中文优先补齐了 `量子位`、`爱范儿`、`IT之家`、`少数派`、`36氪` 等。
+- 本机已落地可直接给 OpenClaw 使用的完整 Prompt 文件：`/home/chriswong/文档/RSS资讯/config/OPENCLAW_DAILY_BRIEF_FULL_PROMPT.txt`。
+- `随手小记` 已从扁平便签列表升级为树形文件管理界面：支持文件夹、空文件夹显示、右键菜单、顶部新建菜单、刷新按钮、面包屑、文件夹/笔记的 ClawOS 风格命名弹窗，以及文件夹删除确认弹窗。
+- 便签树前端现支持自动展开父级目录、定位滚动和短暂高亮，便于新建/重命名后快速定位节点；同时新增了笔记拖拽到文件夹（含根目录）的交互，后端复用 `/api/system/notes/:id/move` 接口。
+- 树节点支持内联重命名：双击文件夹或笔记即可直接编辑名称，回车保存、Esc 取消；新建文件夹仍使用统一的 ClawOS 风格弹窗，避免浏览器原生 `prompt/confirm` 打断体验。
+- 修复了 `文件总管` 打开后显示 `{"success":false,"error":"Authentication required"}` 的回归。根因不是 FileBrowser 本身异常，而是 ClawOS 登录后只给前端 `fetch` 打了 Basic Auth 补丁，`iframe` 自己发起的导航和后续资源请求并不会继承这个补丁，因此 `/proxy/filebrowser` 被后端鉴权中间件拦截。
+- 后端 `backend/src/server.ts` 现为 FileBrowser 代理单独发放一个 `HttpOnly + SameSite=Lax` 的受限鉴权 cookie，并且只在 `/proxy/filebrowser` / `/clawos/proxy/filebrowser` 请求上接受该 cookie。这样既能让 iframe 正常工作，又不会放宽其他 API / 代理的认证边界。
+- 增加了 `backend/tests/filebrowserAuthCookie.test.ts`，锁定这条专用鉴权链路，避免之后再被整站 Basic Auth 调整误伤。
+
+### 2026-03-31 (安全加固)
+- 针对用户提出的安全问题进行了全面加固：
+  - **ClawOS HTTP Basic Auth**: 为整个后端添加了基于 `express-basic-auth` 的认证中间件，所有路由（前端、API、代理）现在都需要用户名密码。用户名固定为 `clawos`，密码从 `~/.clawos/.env` 的 `CLAWOS_PASSWORD` 读取。
+  - **绑定地址限制**: 将服务器绑定地址从 `*:3001` 改为 `127.0.0.1:3001`，阻止 LAN 和 Docker 网络的直接访问。
+  - **唯一入口**: 现在只有 Tailscale Funnel 能作为公网入口，走加密隧道 + Basic Auth 双重保护。
+- 架构确认：
+  - OpenClaw 保持 `127.0.0.1:18789` 仅本地监听，通过 ClawOS 的 `/proxy/openclaw` 路由代理访问。
+  - Tailscale Funnel 暴露的是 ClawOS (3001)，不是 OpenClaw (18789)。
+- 验证结果：
+  - 无认证访问返回 401 ✅
+  - 带认证访问返回 200 ✅
+  - LAN IP 直接访问连接被拒绝 ✅
+
+### 2026-03-31 (安全审计与清理)
+- 执行了全面的安全审计，检查了所有潜在入侵风险点：
+  - **发现 RDP 暴露**: 端口 3389 监听在所有网络接口，有活跃连接来自内网设备（用户正在使用，保持现状）
+  - **发现旧密码泄露风险**: `~/.clawos/.env.save` 文件包含旧密码
+  - **发现权限过宽**: `~/.clawos/.env` 权限为 664（同组用户可读写）
+  - **发现无防火墙**: UFW 未安装，iptables 无规则
+- 已执行的清理操作：
+  - ✅ 删除旧密码备份文件 `~/.clawos/.env.save`
+  - ✅ 修复文件权限：`~/.clawos/.env` 和 `~/.openclaw/.env` 改为 600（仅所有者可读写）
+- 剩余风险（用户选择暂不处理）：
+  - RDP 保持暴露（用户正在使用）
+  - 未安装防火墙（依赖应用层认证）
+
+### 2026-03-31 (集成式登录界面)
+- 重新设计了登录体验，结合后端安全和前端用户体验：
+  - **后端**: 恢复 HTTP Basic Auth，所有 API 路由都需要认证（401 拒绝未认证请求）
+  - **前端**: 创建 `LoginScreen.tsx` 组件，类似 macOS/远程桌面的登录界面
+  - **用户体验**: 
+    - 用户访问网站时显示深色渐变背景 + 玻璃拟态效果的登录界面
+    - 仅需输入密码（无需用户名），简约设计符合 ClawOS 整体风格
+    - 密码验证成功后进入桌面，密码只存于 React Context（内存）
+    - 刷新页面或关闭标签页后需重新输入（符合用户"每次都要输入密码"的需求）
+  - **技术实现**:
+    - 新增 `/api/system/auth/verify` POST 接口用于密码验证
+    - 使用 useEffect 重载 `window.fetch`，自动为所有请求添加 `Authorization: Basic xxx` 头
+    - 登录状态通过 `isAuthenticated` 控制，未登录时只渲染 `LoginScreen`
+- 解决了 HTTP Basic Auth 浏览器缓存问题：
+  - 之前浏览器会自动缓存 Basic Auth 凭证，导致刷新不需要重新输入
+  - 现在前端控制登录状态，刷新后内存清空，必须重新输入密码
+- 验证了所有功能正常：
+  - ✅ 未认证访问前端和 API 返回 401
+  - ✅ 带认证访问返回 200
+  - ✅ 登录界面美观，用户体验流畅
+  - ✅ OpenClaw 代理和 API 调用自动带上认证头
+- **发现问题并修复**：
+  - 用户反馈需要登录两次（浏览器弹窗 + 前端界面）
+  - 原因：`express-basic-auth` 配置 `challenge: true` 导致浏览器自动弹窗
+  - 修复：移除 `express-basic-auth`，改用自定义中间件，只检查 Authorization header，不弹窗
+  - 效果：现在只需在前端登录界面输入一次密码
+
+### 2026-03-30 (AI 炒股应用)
+- 基于 `ClawOS-量化交易系统-v3.4.md` 架构，创建了全新的 **AI 炒股** 前端应用。
+- 采用纯前端 Mock 形式实现了所有的交互界面，包括总览看板、每日策略（含决策流）、持仓风控、记忆复盘、行为画像五个模块。
+- 严格落实了“人机协作协议”，在推翻 AI 策略时强制要求收集用户理由，并实现了行为偏差警告弹窗（冷静期拦截），确保前端逻辑符合 v3.4 记忆闭环的要求。
+
+
+### 2026-03-30
+- 进一步优化了服务监控页面（Monitor.tsx）的空间利用率。将顶部占用大量垂直空间的 4 张独立状态总览卡片压缩为单行的紧凑状态条。同时彻底移除了次顶部的“优先处理”聚合卡片，因为服务列表中已经按异常优先排序，移除该区块能腾出更多空间。
+- 针对 16:9 屏幕（非带鱼屏），弃用了死板的 `grid-cols-2` 布局，全面改用 Tailwind 的 `columns` 瀑布流自适应布局。
+- 把巨大的“守护进程”卡片拆分为“核心服务”与“自动守护”两个独立的小模块，便于在瀑布流布局中像拼图一样填充各列。
+- 横向展开了异常服务的展示区，并缩减了各卡片内部无意义的留白和间距（比如将 `p-5` 减为 `p-4`，缩小占位图标），彻底消除了下方的大量留白问题，极大提升了 1080p/1440p 下的同屏信息密度，实现了大部分情况下一屏看完所有监控状态。
+
+### 2026-03-29
+- Completed the root-cause pass for the long-running embedded OpenClaw failure instead of continuing incremental pairing workarounds. The decisive upstream discovery was in `docs/gateway/trusted-proxy-auth.md`: when `gateway.auth.mode = "trusted-proxy"`, Control UI WebSocket sessions can connect without device pairing identity. That means ClawOS no longer needs to fight Control UI device persistence inside an iframe if ClawOS itself is the single authenticated entry point.
+- Reclassified the earlier hypotheses accordingly: forwarded headers were not the durable blocker anymore, because recent logs already showed `fwd=::ffff:127.0.0.1` and real Tailscale IPs on some requests. The persistent failure mode was architectural mismatch: OpenClaw was still being asked to enforce browser-device pairing inside a proxied iframe, even though the intended product model is "remote browser trusts ClawOS, and ClawOS alone reaches local OpenClaw".
+- Switched `~/.openclaw/openclaw.json` from token auth to `gateway.auth.mode: "trusted-proxy"`, configured `gateway.auth.trustedProxy.userHeader = "x-forwarded-user"`, required `x-forwarded-proto` and `x-forwarded-host`, and restricted `allowUsers` to the synthetic identity `clawos`. This keeps OpenClaw loopback-only while making ClawOS the only trusted authenticator in front of it.
+- Updated `backend/src/server.ts` so both the HTTP proxy path and WebSocket upgrade path now inject the trusted-proxy identity headers (`x-forwarded-user: clawos` plus normalized forwarded proto/host values) on every proxied OpenClaw request. This is the key integration contract: embedded OpenClaw sessions are now authenticated as having already passed through the trusted ClawOS proxy, instead of relying on browser device pairing state.
+- Retained the earlier frontend token-bootstrap and `#token=` fragment improvements as harmless compatibility belt-and-suspenders, but they are no longer the primary gate for successful embedded access. The main auth decision is now the trusted-proxy header path.
+- Added backend regression coverage so the OpenClaw proxy test now locks in the trusted-proxy identity header injection alongside the existing prefix rewrite and proxy configuration assertions.
+- Verified the final behavior with Playwright against both the local ClawOS entry (`http://127.0.0.1:3001/clawos/`) and the remote Tailnet entry. In both cases the embedded OpenClaw iframe opened directly into the Control UI instead of getting stuck on `pairing required`. The latest gateway logs after the final restart show successful `webchat connected` events without new pairing rejections for the validated sessions.
+
+### 2026-03-29
+- Re-checked the latest OpenClaw gateway logs before changing code. Important discovery: `fwd=n/a` is not the persistent blocker anymore. Newer connections now sometimes show forwarded values like `::ffff:127.0.0.1` and the real Tailscale IP, so the proxy header path is at least partially reaching OpenClaw. That moves the primary suspicion back to Control UI bootstrap timing rather than trusted-proxy forwarding.
+- Identified a concrete race in the embedded OpenClaw path: `frontend/src/App.tsx` was generating the iframe URL immediately while `primeEmbeddedOpenClawStorage()` fetched the token asynchronously in the background. This meant the iframe could boot and attempt a WebSocket connection before the gateway-scoped token existed in `sessionStorage`, matching the observed intermittent `token_missing` logs.
+- Adjusted the frontend bootstrap flow to minimize that race without reintroducing invasive proxy hacks. `primeEmbeddedOpenClawStorage()` now returns the resolved token, `App.tsx` waits for that bootstrap before mounting the OpenClaw iframe, and the iframe URL now includes the upstream-recommended `#token=...` fragment in addition to the existing same-origin storage priming. This keeps the token out of server logs while giving Control UI the token during its very first bootstrap pass instead of only after async storage seeding.
+- Added frontend regression coverage for the new flow: tests now verify `primeEmbeddedOpenClawStorage()` returns the resolved token and that the generated embedded OpenClaw iframe URL carries the token via URL fragment rather than query params.
+- Frontend tests and production build passed after the timing fix. Live runtime verification against the running `clawos` service is still needed to confirm whether this removes the remaining intermittent `token_missing` events and whether the residual blocker is now purely `pairing required`.
+
+### 2026-03-29
+- Continued the OpenClaw embed repair and changed direction after confirming the upstream auth model mismatch. OpenClaw is now configured for `gateway.auth.mode: "token"` instead of password, and `gateway.tailscale.mode: "funnel"` was removed because the user explicitly wants ClawOS to be the only remote entry while OpenClaw itself stays local-only on `127.0.0.1:18789`.
+- ClawOS now exposes a same-origin OpenClaw bootstrap endpoint (`/api/system/openclaw/bootstrap`) and `frontend/src/lib/openclawStorage.ts` now actively fetches the current gateway token and seeds gateway-scoped `sessionStorage` before the iframe opens. This fixed the earlier `gateway token missing` failures in the embedded Control UI path.
+- Removed the temporary OpenClaw password-bridge implementation from `backend/src/server.ts`. The prior bridge was only a stopgap for password auth and conflicted with the more stable token/session model already used by upstream Control UI.
+- Confirmed with live browser inspection that the proxied OpenClaw iframe now holds both the expected `openclaw-device-identity-v1` in `localStorage` and the correct gateway-scoped token in `sessionStorage` under `openclaw.control.token.v1:ws://127.0.0.1:3001/clawos/proxy/openclaw`.
+- Current remaining blocker is narrower but still unresolved: even with stable iframe storage and approved device records, the proxied OpenClaw connection at origin `http://127.0.0.1:3001` continues to be rejected as `pairing required`, and gateway logs still show `fwd=n/a`. This suggests the final issue is in how OpenClaw interprets pairing/device identity when reached through the local ClawOS proxy, not in token bootstrap anymore.
+- Investigated and partially repaired a real OpenClaw embed regression reported from `ClawOS`: the iframe path had fallen behind newer OpenClaw gateway security expectations. Root cause was layered, not single-point: proxied requests were no longer treated as trusted loopback traffic (`gateway.trustedProxies` missing), the local ClawOS origin was not whitelisted in `gateway.controlUi.allowedOrigins`, and the newer gateway still required password auth while the upstream Control UI intentionally keeps passwords only in memory instead of browser storage.
+- Updated `~/.openclaw/openclaw.json` to trust the local ClawOS proxy (`127.0.0.1` / `::1`) and to allow `http://127.0.0.1:3001` plus `http://localhost:3001` as Control UI origins. This removed the earlier `Proxy headers detected from untrusted address` and `origin not allowed` failures from the embedded route.
+- Added a new ClawOS-side OpenClaw password bridge in `backend/src/server.ts`: proxied OpenClaw HTML now injects a same-origin bridge script endpoint, and that script loads the current gateway password into page memory only, matching OpenClaw's own “password stays in memory” model instead of persisting it to browser storage. The backend also now falls back to parsing `~/.openclaw/.env` when `clawos.service` itself does not inherit `OPENCLAW_GATEWAY_PASSWORD`.
+- Added backend regression coverage in `backend/tests/openclawProxyInjection.test.ts` to lock in the two-prefix OpenClaw proxy rewrite, password bridge injection, and `.openclaw/.env` fallback behavior.
+- Current state after live verification: the embedded OpenClaw route now clears the earlier `password missing` and `origin not allowed` blockers, but a freshly generated Control UI device identity still triggers a new `pairing required` request on each clean browser validation run. Approving one request succeeds, yet a subsequent fresh browser session generates another pending device. This means the remaining issue is no longer proxy/auth bootstrap, but unstable device-identity reuse in the embedded Control UI context. If continuing, next investigation should focus on why the proxied/embedded Control UI does not consistently reuse the same device identity across fresh sessions.
+- Continued the automation pass to cover more of the new machine-owned state model. Added a second Playwright smoke script for desktop quick-note persistence (`frontend/scripts/e2e-quicknote-persistence.mjs`) so both desktop personalization and widget note content now have browser-level save/reload verification against the live `/api/system/config/ui` backend.
+- Strengthened music login-state regression coverage at the backend boundary by testing cookie normalization and invalid payload rejection on `/api/system/music/settings/cookie`. This keeps the server-owned Netease auth state from regressing through malformed writes even without trying to over-mock the third-party QR SDK internals.
+- While stabilizing the browser smoke tests, confirmed a real UX nuance in the current app shell: desktop widgets render from optimistic defaults and then reconcile with server UI config asynchronously. The smoke tests were updated to wait for post-sync steady state instead of asserting too early. This is acceptable for now, but it documents a potential future polish task if the initial flash becomes user-visible.
+- Added a real browser-level regression script for the new server-owned desktop preference model: `frontend/scripts/e2e-settings-persistence.mjs`. It validates that ClawOS boots from server-side UI config, a settings change is written back to `/api/system/config/ui`, and a full page reload still reflects that persisted machine state. This gives the cross-device “remote desktop, not browser profile” goal at least one direct end-to-end guardrail.
+- During that E2E work, the first automation attempts against the custom Widgets toggle were noisy and unreliable because the control is implemented as a hidden checkbox with a styled wrapper, so the stable smoke path was switched to wallpaper selection instead. The saved behavior being validated is still the same server-side UI persistence path, but through a more automation-friendly control.
+- Performed a broader ClawOS test-audit pass instead of only touching the recently changed personalization feature. Mapped current backend/frontend modules against the existing test suite and filled several obvious zero-coverage gaps with stable route/helper tests instead of heavy UI snapshots.
+- Added backend coverage for `speedtest`, `reader`, `cron`, and `video` routes. The new tests lock down binary download/upload behavior, RSS feed persistence plus cached fallback behavior, cron CRUD validation/persistence, and basic video-source response mapping / invalid-source rejection.
+- Added frontend coverage for `openclawStorage` priming so embedded OpenClaw sessions keep inheriting the expected settings/token storage semantics even when gateway-specific keys are missing. This protects an integration detail that is easy to regress because it lives outside the main app UI.
+- Re-ran the full backend/frontend test suites and production builds after adding those cases. Current coverage is still mostly route/helper-level rather than component-E2E, but the safety net is now meaningfully wider across ClawOS core subsystems.
+- Finished the second stage of the “server is the source of truth” migration for cross-device desktop consistency. Added `config/ui` server-side persistence for desktop personalization and preference state (`dockSize`, `autoHideDock`, `defaultFullscreen`, `wallpaper`, `showWidgets`, `dockHideDelay`, `musicQuality`, `quickNote`) so these settings no longer depend on whichever browser last opened ClawOS.
+- Wired the frontend shell and related apps to that server-side UI config: `App.tsx` now initializes desktop appearance from the backend and saves changes back there, `MusicApp.tsx` now stores Netease quality preference on the server, and `DesktopWidgets.tsx` now keeps the quick-note content on the server as machine state instead of browser-local scratch data. This keeps remote sessions closer to a real remote desktop mental model.
+- Added regression coverage for the new UI config API on both backend and frontend, bumped the visible app version to `v1.3.4`, and reran backend/frontend tests plus builds before restarting the live `clawos` service.
+- After the server-side path config center shipped, the remaining mismatch was the live global download directory still pointing at `/data/downloads`. Updated the running Aria2 global directory to `/home/chriswong/下载` so the machine's actual runtime now fully matches the desired persistent path model. Verified live that `config/paths`, downloads status, Quark netdisk push-to-download, and downloaded-track listing all use the new directory.
+- Fixed another cross-device state ownership problem: path settings were still split across multiple browser-local stores, so remote clients could drift away from the machine's real preferred directories. Added a server-side path configuration center under the existing config API and started moving path-based app settings to it (`downloads`, `local music`, `netease music downloads`, `video downloads`, `notes`). The intended mental model is now explicit: remote ClawOS sessions should behave like opening this machine's desktop, so path choices belong to the server, not to whichever browser happened to visit last.
+- Fixed the Netease login-state ownership bug. The previous implementation incorrectly split authority between browser-local `localStorage` and a backend in-memory variable, so remote clients could appear logged out even though this machine had already logged in. The music route now persists the Netease cookie under the local ClawOS state directory and reloads it on demand, while the frontend initializes from the server-side cookie instead of trusting each browser's cached copy.
+- After the hardening pass, a real regression was reported: Quark netdisk downloads appeared broken. Root cause was not the security policy itself but an operational mistake during rollout: the live `clawos.service` briefly ran an old production bundle while the runtime secrets had already changed. Rebuilt the backend, verified the live `/api/system/netdisk/download` path with a real Quark file, and added a regression test that locks the `AList raw_url -> aria2.addUri` flow to the environment-provided aria2 secret so this exact mismatch is less likely to recur.
+- Added a new security-surface probe and monitor card that summarize whether sensitive services are still correctly hardened (`AList`, `aria2`, `FileBrowser`, `SearXNG` local-only; `ClawOS` direct access preserved by design) and whether weak credentials have been replaced. Fixed two probe bugs during rollout: startup-timing false negatives and IPv6 loopback parsing for aria2 (`[::1]:6800`).
+- Completed the first real security hardening pass on the live machine instead of just planning it. Kept `clawos :3001` externally reachable because the user explicitly wants both direct access and Tailscale/Funnel access, but tightened every higher-risk auxiliary service: `FileBrowser :18790`, `AList :5244`, `aria2 :6800`, and `SearXNG :38080` are now local-only (`127.0.0.1`) and therefore no longer reachable by direct remote port access.
+- Removed hardcoded weak service credentials from the ClawOS backend path. `AList` admin credentials and `aria2` RPC secret now come from service environment variables, the live AList admin password was rotated to a strong random value, the live aria2 secret was rotated and written into `~/.aria2/aria2.conf`, and ClawOS was updated to keep working with those new secrets after restart.
+- Adjusted the netdisk UX to match the new security posture: the AList admin page is now explicitly presented as local-only. Remote ClawOS sessions can still see/copy the admin credentials, but the UI no longer assumes that opening `host:5244` remotely will work after hardening.
+- Recreated the SearXNG container with a localhost-only port mapping and updated `~/.openclaw/.env` so OpenClaw now points to `http://127.0.0.1:38080`. Verified on the running machine that ClawOS main entry, service monitor, FileBrowser proxy, netdisk status, downloads status, OpenClaw gateway, and backup monitor endpoints all remain healthy after the hardening changes.
+- Finished the last service-monitor UX layer so the page now behaves like a practical maintenance dashboard instead of a detailed status dump. Added top-level summary cards (total / high-risk / warning / healthy), a dedicated `优先处理` block that automatically hoists abnormal services to the top, and per-service plain-language action suggestions so the user immediately knows what to check next when something looks wrong.
+- Continued the monitor polish beyond raw health checks so the page becomes a practical triage surface instead of a static status list. Core services and watchdogs are now sorted with unhealthy/high-risk items first, watchdog rows show both risk level and relative recency (e.g. “5 分钟前”), and the risk labels make it much faster to spot what should be investigated first during real maintenance.
+- Upgraded the monitor from a raw systemd list into a two-layer availability dashboard for core services. `clawos`, `filebrowser`, `openclaw`, `aria2`, and `alist` now report both process state and a readonly health probe result, which lets the UI distinguish “service is running” from “service is actually responding” without invoking any repair action or mutating external systems.
+- Expanded the Service Monitor process list so it better matches the user's real daily dependency chain instead of only the first-round desktop services. Added `clawos-aria2.service`, `clawos-alist.service`, and `clawos-display-inhibit.service` to the monitored core-service set because downloads, netdisk mounting, and remote-session stability are now all first-class ClawOS capabilities.
+- Rewrote the service descriptions to be understandable for a non-technical user. Each monitor entry now explains in plain Chinese what the service does and what breaks when it goes down, so the monitor page reads like an operations dashboard instead of a raw systemd list.
+- Updated the Service Monitor backup area to match the user's actual three-layer backup model instead of mixing product names and implementation details. The monitor now presents `整机级备份 (restic + OSS)`, `系统级备份 (Timeshift)`, and `应用级备份 (ClawBackUp)` as three separate cards so the dashboard reflects the user's real disaster-recovery mental model.
+- Added a new backend readonly probe `/api/system/restic-backup` for the machine-level backup layer. It only inspects the local `ClawOSBackUp/restic/snapshots` directory plus readonly config artifacts (`restic-crontab.txt` / `restic-cron.conf` / `~/.config/restic-oss-env.sh`) to report local snapshot presence, OSS configuration, and schedule configuration without invoking restic commands or modifying any backup setup.
+- Added regression coverage for the new restic observer and the monitor backup tone helper so future monitor work does not accidentally reintroduce invasive behavior or break the three-layer backup status semantics.
+- Corrected the notes storage model to match the real product requirement: persisted notes are now actual `.md` files in the selected notes directory, not rows inside a `notes.json` container. `backend/src/utils/notesStore.ts` was rewritten around per-note Markdown files with lightweight front matter metadata, and legacy `notes.json` files are auto-migrated into Markdown files on first read so existing data is preserved without manual export/import.
+- Expanded the Notes editor toolbar so it supports a meaningfully broader Markdown subset instead of a barely formatted writing surface. The current WYSIWYG editor now covers H1/H2/H3, bold, italic, underline, strikethrough, inline code, code block, quote, bullet list, ordered list, horizontal rule, and links, which makes the “Markdown as real storage format” claim much closer to the user's expectations.
+- Continued the notes-editor polish by removing the remaining browser-native UX around links. Link editing now uses an in-app dialog instead of `window.prompt`, and the editor also exposes quick actions for image/table Markdown insertion plus a lightweight Markdown help sheet so users can discover supported syntax without leaving the app.
+- Added two more meaningful Markdown-writing capabilities to `随手小记`: task lists and local image insertion. Task lists now map to real Markdown checkboxes via TipTap task-list extensions, and local image insertion uploads the selected file into the current notes directory under `assets/`, then inserts a relative Markdown image path so the note remains portable as a Markdown folder instead of depending on external URLs.
+- Continued that work by making images and tables visible first-class editor nodes instead of only textual Markdown snippets. Notes now support drag-and-drop and clipboard image upload into the current notes directory, and the editor styles were extended for task lists, images, and tables so those richer Markdown elements still feel at home inside the note-taking UI.
+- Fixed the first-round NotesApp regressions reported after the editor redesign. Root-cause investigation showed the `+` action itself still created notes successfully, but the UI lacked clear feedback when multiple untitled notes existed; the directory settings popup also remained an in-layout absolute panel that could be visually occluded. `DirSetting` is now rendered as a portal-backed modal overlay, note creation/changing-directory show explicit toast feedback, and directory switching actively reloads/selects notes from the new path.
+- Added a dedicated backend notes migration endpoint (`POST /api/system/notes/migrate`) so path switching can offer a real “migrate old notes into new directory” flow instead of making the frontend guess how to merge files. The migration merges source/target `notes.json` by note id and sorts by `updatedAt`, and backend tests now cover that behavior.
+- Investigated the follow-up “切换目录失败” report and found the true root cause in persisted data, not the new directory-switch UI: `~/.clawos/notes.json` had become invalid JSON because note writes were not serialized, so overlapping create/autosave writes appended duplicate JSON fragments into the same file. Added `backend/src/utils/notesStore.ts` with queued atomic writes plus shared read helpers, wired all notes routes through it, added concurrency coverage, and repaired the user's current `~/.clawos/notes.json` back to valid JSON so the feature can recover immediately.
+- Fixed a second directory-switch root cause triggered by Chinese paths. Notes directory selection had still been transported through the `X-Notes-Dir` HTTP header, and browsers reject non-ISO-8859-1 header values before the request is sent, which is why `/home/chriswong/文档/随手小记` failed instantly on the client. The notes API now accepts `dir` via query/body instead of headers, and the Notes app default directory is now `/home/chriswong/文档/随手小记`. Verified the Chinese-path switch flow live in-browser.
+- Added a clearer directory status block to `NotesApp`, so the current notes directory is always visible and actionable. Users can now open the current notes directory directly in FileBrowser or copy the full path, which reduces ambiguity after switching directories and makes the new default Chinese-path location easier to verify.
+- Further simplified that directory affordance after user feedback: the dedicated current-directory card in the sidebar was too visually heavy for a note-taking app. It has now been reduced to a single folder icon placed immediately left of the directory settings button; clicking it opens the current notes directory, and the full path lives in the tooltip instead of occupying permanent sidebar space.
+- Reworked the `随手小记` app from a programmer-facing Markdown editor into a note-first writing surface. Replaced the old `@uiw/react-md-editor` live Markdown UI with a single-column WYSIWYG-style editor built on TipTap, while keeping Markdown as the persisted storage format through explicit Markdown <-> HTML conversion helpers. This preserves exportability and plain-text portability without forcing the user to see Markdown syntax while writing.
+- Refreshed the notes UI to feel closer to mobile notes / Typora: warmer paper-like canvas, stronger title treatment, quieter sidebar previews, and direct `.md` export for the active note. Added focused frontend tests for note preview cleanup and Markdown conversion so the new editor pipeline is locked down.
+- Corrected the OpenClaw backup monitoring after inspecting the real backup layout. The backup root is not a flat list: it contains `versions/` (directory-form backups), `zips/` (zip backups), and `VERSIONS.md` as an index file. The backend probe now reports those two backup formats separately and exposes whether the index file exists, while the frontend renders the OpenClaw backup card as two sub-sections instead of incorrectly aggregating the root folder contents.
+- Expanded backend regression coverage so OpenClaw backup monitoring is locked to the real structure: generic latest-by-mtime directory probing, missing-directory errors, and separate `versions/` vs `zips/` reporting.
+- Extended the OpenClaw backup probe to parse the latest row from `VERSIONS.md` and compare it against the newest entries in both `versions/` and `zips/`. The monitor UI now surfaces a dedicated sync-status banner (`正常 / 告警 / 缺少索引`) so drift between the index file and real backup outputs is visible immediately instead of requiring manual filesystem inspection.
+- Continued the download-widget polish after semantic sync: the desktop `下载队列` card itself is now clickable and opens the `downloads` app directly, while failed tasks surface backend `errorMessage/errorCode` summaries inline instead of a generic `任务失败`. This keeps the desktop surface actionable enough for quick triage without duplicating the full download-manager UI.
+- Synchronized the desktop `下载队列` widget with the new download-manager semantics instead of the old raw aria2 active-only view. The widget now reads `/api/system/downloads/tasks`, reuses shared helpers for task title/status copy, shows engine online/offline state plus bucket counts, and prioritizes `下载中 -> 排队中 -> 已暂停 -> 失败 -> 已完成` so the desktop surface matches the main download app's mental model.
+- Extracted shared frontend helpers in `downloadTaskMeta.ts` for task display names, widget task prioritization, and widget status tones, then added focused tests covering those rules. This avoids state/category drift between the main download page and the desktop widget as download UX keeps evolving.
+- Completed a full download-manager product iteration instead of a single patch. The backend `downloads` route was upgraded from a thin aria2 RPC passthrough into a small business layer with dedicated endpoints for engine status, task listing, task creation, task actions, history cleanup, and config persistence. This gives the frontend stable product-level semantics (`engine offline`, `queue hint`, `removed count`) instead of making it reason about raw RPC methods everywhere.
+- Rebuilt the download manager frontend around those business endpoints. Added explicit engine online/offline status, global download stats, richer filter buckets (`下载中 / 排队中 / 已暂停 / 失败 / 已完成`), clearer task cards with directory and multi-file info, visible failure messages, and operation toasts so users are no longer left wondering whether add/pause/delete actions succeeded.
+- Added the requested one-click history cleanup as a safe product feature: the UI now exposes `清理已完成` / `清理失败与已删除` / `清空全部历史`, shows how many records will be removed, and explicitly keeps local files untouched during history cleanup.
+- Improved download task lifecycle UX: new-task modal now distinguishes global default directory from per-task override, magnet links return a metadata-fetch hint, task cards support opening the save directory in FileBrowser and copying the path, and delete confirmation now clearly separates “delete task record” from “delete task + local files”.
+- Added backend tests for downloads task aggregation, cleanup scope handling, task creation hints, and config persistence; added frontend tests for download filter/status/cleanup copy rules; reran backend/frontend tests and builds, then restarted `clawos.service` to apply the new download manager experience live.
+- Fixed a frontend regression in the netdisk file list where Quark files could show the wrong icon/type category (for example `mp3` appearing with the image icon). Root cause: `NetdiskApp` was trusting AList's numeric `type` field for icon/filter decisions, but Quark responses did not make that field reliable enough for frontend classification.
+- Added a small `netdiskFileType` helper that classifies files by extension into `folder/image/video/audio/document`, switched both the file icon renderer and sidebar filters to use that shared classification, and covered the behavior with focused frontend tests for folder/image/video/audio/document detection.
+- Re-investigated the persistent “夸克网页登录跳回 ClawOS” report without assuming the server was still at fault. Browser-level instrumentation on the live `/clawos/` app showed the frontend really was calling `window.open` from inside `startQuarkWebLogin`, and exposed the true issue: the first implementation awaited the reset request before opening the popup, which moves the popup call out of the user's synchronous gesture chain in real browsers.
+- Tried the intermediate “open `about:blank` first, then set `popup.location.href`” workaround and verified with Playwright that the popup stayed on `about:blank` instead of navigating. This ruled out the workaround and confirmed the popup timing/navigation logic itself was the root cause, not proxy routing.
+- Fixed the root cause in the frontend by extracting `startQuarkWebLoginFlow`, synchronously opening the real target URL (`/clawos/proxy/quark-auth/` or `/proxy/quark-auth/`) inside the click handler, and only then firing the async reset request. Added focused frontend tests to lock in the popup-open-before-reset ordering and base-path behavior.
+- Added `quarkLoginStartedAt` tracking in `NetdiskApp` so the polling loop only accepts Cookie updates written after the current login attempt started, preventing stale pre-reset sessions from being auto-consumed.
+- Rebuilt/restarted the live service and re-validated with Playwright that the actual `/clawos/` app now emits `window.open('/clawos/proxy/quark-auth/', '_blank', 'noopener,noreferrer')` and the popup lands on the Quark login proxy page instead of blanking or bouncing back into ClawOS.
+- Investigated a new regression reported from the real `/clawos/` entry: clicking “夸克网页登录” appeared to jump back into ClawOS instead of opening the Quark login page. Reproducing with Playwright revealed `/clawos/` itself had fallen into an infinite `302 -> /clawos/` self-redirect loop.
+- Traced that regression to the helper redirect route intended to normalize `/clawos` to `/clawos/`. Under Express's default non-strict routing, the route also matched `/clawos/`, so every visit to the base-path entry redirected back to itself.
+- Fixed the base-path redirect by switching to an `originalUrl === '/clawos'` guard middleware, rebuilt/restarted `clawos.service`, and re-validated with Playwright that `http://127.0.0.1:3001/clawos/` now serves the app normally and Quark web login opens the expected popup URL `/clawos/proxy/quark-auth/` again.
+- Investigated the next real Quark blocker after browser-side login started working: the user could complete login, but mount still failed. Live inspection showed AList did create `/quark`, yet the storage record had `addition: {"cookie":""...}` and status `require login [guest]`, so the problem was no longer cookie capture but malformed AList create payloads.
+- Confirmed the root cause by probing AList directly: when driver credentials are sent inside `addition`, AList stores them correctly; when sent as top-level fields, it silently creates the storage with empty Quark cookie/root-folder values. Updated `backend/src/routes/netdisk.ts` so both Quark and Baidu driver-specific credentials are serialized into `addition` JSON before `storage/create`.
+- Hardened netdisk configure handling so AList responses like “failed init storage but storage is already created” are treated as recoverable create results instead of hard failures, allowing ClawOS to continue checking the actual mount state after creation.
+- Added a backend regression test proving Quark credentials are now written into `addition`, reran backend tests/build, restarted `clawos.service`, and verified on the live AList instance that probe configuration now stores `cookie` correctly in the Quark storage record. Removed the temporary probe storage afterward to avoid polluting the real user setup.
+- Continued the Quark web-login validation on the live `clawos.service` instance instead of only relying on unit tests. Confirmed the backend proxy no longer crashes, but `/api/system/netdisk/quark-auth/status` still only held a bare `ctoken`, so the remaining failure was no longer server death but incomplete browser-side login flow.
+- Reproduced the real root cause in Playwright: the Quark popup opened correctly at `/proxy/quark-auth/`, but after clicking “立即体验” its login script still tried to call `https://pan.quark.cn/...` and `https://uop.quark.cn/...` directly from the proxied `http://127.0.0.1:3001` origin, so browser CORS blocked QR-code login and service-ticket polling.
+- Fixed the Quark proxy layer in `backend/src/server.ts` with the smallest viable approach: added a second proxy for `uop.quark.cn`, switched the Quark HTML proxy to response interception, and injected a small request-rewrite script so `fetch`/`XMLHttpRequest` calls targeting `pan.quark.cn` and `uop.quark.cn` are transparently routed back through local `/proxy/quark-auth` and `/proxy/quark-auth-uop`.
+- Added a backend regression test to lock in the presence of the injected Quark request-rewrite path, reran backend tests/build, restarted `clawos.service`, and re-validated with Playwright that the popup now requests local proxy URLs for QR token and login polling without any CORS errors.
+- Restarted the real `clawos.service` after rebuilding so the live port `3001` instance picked up the latest backend/frontend artifacts.
+- Re-verified the production-like instance directly: `/api/system/localmusic/cover/:id` now returns `200 OK`, `/api/system/localmusic/list` returns the fully enriched library for `/home/chriswong/音乐`, and the Playwright E2E script completed successfully against the live service.
+- Browser validation now covers Local Music Pro scan + badge + playback UI and Netease search + playback UI on the actual running dashboard, closing the last remaining validation gap for this session.
+- Installed Playwright + Chromium under `frontend/` and added `frontend/scripts/e2e-validate.mjs` for browser-level validation of Local Music Pro scanning/enrichment plus Netease search/playback flows.
+- Browser validation uncovered another real backend issue: `/api/system/localmusic/cover/:id` still returned 404 even when the JPG existed, because Express `sendFile()` was serving from the hidden `~/.clawos/music_cache/` directory and dotfiles are denied by default.
+- Fixed the cover route to call `sendFile(..., { dotfiles: 'allow' })` and added a regression test proving hidden-cache JPG files are now served correctly.
+- Verified the cover fix with backend tests/build and isolated-port `curl` checks (`200 OK` on `/api/system/localmusic/cover/:id`).
+- Full browser E2E is partially blocked by the current machine environment: the resident ClawOS service on the default port interferes with temporary validation instances, and even isolated-port Playwright runs are seeing intermittent empty responses. Remaining work is operational isolation, not a newly confirmed code bug.
+- Added a higher-level backend regression test for the Local Music Pro enrichment chain: seeded cached Netease metadata, ran `/api/system/localmusic/scan`, verified lyric cache file creation, DB persistence, and `/api/system/localmusic/list` returning enriched artist/album/lyric flags.
+- The chain test passed without further code changes, which confirms the current cache-driven enrichment path is working end-to-end at the backend level after the recent cache write and stale-cover fixes.
+- Traced the historical Local Music Pro cover 404 logs to stale DB reuse during rescans: when an existing track entry was reused, the scan flow skipped `applyCachedMetadata()`, so `hasCover: true` could survive even after the cached JPG had been deleted.
+- Fixed `/api/system/localmusic/scan` to re-validate reused tracks through cached metadata application before returning/saving them, preventing stale cover flags from generating repeated `/cover/:id` 404 requests.
+- Added a regression test that seeds a missing-cover DB entry and verifies a rescan clears `hasCover` back to `false`.
+- Continued the music stability pass and traced the abnormal `~/.clawos/music_cache/netease_tracks.json` size issue to a real backend race condition instead of a matching-quality problem.
+- Confirmed the local library DB already held 30 distinct `neteaseId` values while the track cache file only kept 3 rows, proving cached metadata writes were being lost during concurrent warmup.
+- Fixed `backend/src/utils/musicCache.ts` by serializing Netease cache mutations and switching file saves to temp-file + rename atomic writes, so bulk metadata warmup no longer overwrites earlier entries.
+- Added a regression test covering 25 concurrent `upsertNeteaseTrackCache()` calls to lock in the fix.
+
+### 2026-03-28
+- Built 6 built-in applications: Notes, Downloads, Baidu Netdisk, Quark Netdisk, Music, Video.
+- Installed and configured `Aria2` via RPC (`/api/system/downloads/rpc`) to handle downloads across apps.
+- Installed and configured `AList` on port 5244, proxied through backend (`/proxy/alist`), allowing seamless UI integration for Baidu and Quark Netdisk viewing and downloading.
+- Implemented **Music App**:
+  - Tested and integrated Kuwo, Netease, and Bilibili APIs.
+  - Added VIP Netease Cookie config to main OS Settings UI.
+  - Created native web audio player with download push-to-aria2 support.
+- Implemented **Video App**:
+  - Added native M3U8 video player via `hls.js`.
+  - Initially tested 3 free MacCMS sources (非凡, 红牛, 无尽).
+  - Later added 5 more reliable backup sources (极速, U酷, 百度, iKun, 最大) to prevent failures.
+  - Fully integrated UI, search, episode selection, and push-to-aria2 download.
+- Desktop polished with auto-hiding dock and clean dynamic spacing.
+
+### 2026-03-29
+- Fixed the AList netdisk proxy issue. AList requires specific base path configurations to work behind `/proxy/alist/` middleware, which caused missing assets and blank pages. Removed the flawed proxy middleware and updated the frontend to directly jump to the dynamically resolved host on port 5244 (`http://${window.location.hostname}:5244/@manage`).
+- Improved `NetdiskApp.tsx` frontend logic: Added clickable directory breadcrumb navigation, functional sidebar file type filtering (All, Images, Videos, Documents), correct "empty directory" visual states, and better file sorting logic (directories first).
+- Refined AList initial login experience: Added a smooth modal prompt when clicking "前往后台挂载", providing the default admin credentials and a one-click copy button, preventing user confusion when faced with a raw AList login screen.
+- Implemented **Infinite Scroll Video Feed**: The Video app now automatically loads a waterfall-style feed of the latest videos on startup.
+- Added a new system setting to toggle "Default Fullscreen Windows". App state now listens to `defaultFullscreen` and automatically pushes new apps into the `maximizedApps` set upon opening.
+- Added "Real-time Network Speed" (rx/tx per second) and "Uptime" status cards to the Dashboard / System Status app. Backend probe updated using `systeminformation` `networkStats()` to calculate the bytes per second difference and `process.uptime()` for service duration.
+- Unified active window animation rendering using strictly Framer Motion Springs to solve stuttering caused by CSS transitions overlapping with React re-renders.
+- Allowed changing Aria2 default download directory directly from the OS Settings panel. This uses a new `POST /api/system/downloads/config` backend endpoint that calls `aria2.changeGlobalOption` (so changes take effect immediately without restarting the downloader service) and explicitly persists it to `~/.aria2/aria2.conf` to survive host reboots.
+- Implemented **RSS Reader App**: Added a new local RSS Reader (`rss-parser` on backend, React frontend) with categorized feeds, clean typography reading view, and simple cache logic.
+- Upgraded **Notes App**: Migrated from a raw textarea to a rich WYSIWYG Markdown editor using `@uiw/react-md-editor` for a Word-like note-taking experience.
+- Implemented **Cron/Task Manager App**: Added a visual GUI for `node-cron` on the backend, saving configurations to `~/.clawos/cron_jobs.json` to schedule arbitrary shell scripts via the web UI.
+- Implemented **QQ Music App**: Integrated `qq-music-api` using the compromise of manually copying login Cookie from the web browser. The app supports searching, accessing user playlists, and playing via exact same UI logic as Netease Music.
+- **Performance & UX Optimization**: 
+  - Added a 0-delay HTML/CSS splash screen (`index.html`) to mask the initial React bundle download time over slow networks (like Tailscale relay).
+  - Enhanced `IframeApp.tsx` with a Framer Motion loading skeleton and smooth scale-in transition that waits for the iframe's `onLoad` event, preventing white-screen anxiety when opening heavy apps like OpenClaw.
+- **UI/UX Tweaks**: 
+  - Changed the red "Close" window button logic across the OS to act exactly like the yellow "Minimize" button (hiding to background instead of killing the process).
+  - Renamed "音乐仓" (Music App) to "网易云" (Netease Cloud).
+- **Custom App Storage Paths**: Added a dedicated `DirSetting` (gear icon) to the header of Video, Music, QQMusic, Notes, and Downloads apps. This allows setting isolated Aria2 download directories or backend JSON storage paths without relying solely on the global default.
+
+### 2026-03-30
+- Enhanced **Download App**:
+  - Added the ability to specify a custom download directory when creating a new task, which defaults to the global directory but can be overridden per task.
+  - Implemented a detailed confirmation modal when deleting tasks, offering a checkbox to "Also delete local files" which communicates with a new backend endpoint `DELETE /api/system/downloads/file` utilizing `fs.unlink`.
+  - Upgraded the UI with a filter toggle (All, Active, Completed) to easily manage large numbers of tasks.
+  - Improved display formatting to show ETA correctly (e.g., `> 1 天` or `1h 30m`) and handled 0 byte cases gracefully.
+- Migrated from **QQ Music** to **Local Music Pro**:
+  - Removed `qq-music-api` as it was impractical without QR login.
+  - Built a cloud-augmented local music player that scans a custom local directory.
+  - Used `music-metadata` to extract ID3 tags (Title, Artist, Album, and embedded Cover Art).
+  - Implemented a smart fallback: if a song lacks cover art or `.lrc` lyrics, the backend silently queries the Netease API to match the song by filename/artist, automatically downloading and caching the missing metadata (covers as `.jpg`, lyrics as `.lrc`) in `~/.clawos/music_cache/`.
+  - Backend supports HTTP 206 Partial Content Range requests (`GET /api/system/localmusic/stream/:id`) for seamless playback and seeking of large lossless audio files.
+  - Frontend features an immersive full-screen view with a blurred background using Framer Motion, dynamic synchronized scrolling lyrics, and smooth play controls.
+- Polished **Local Music Pro** UI/UX:
+  - Addressed broken images (cracked image icons) by adding a React synthetic `onError` handler that automatically replaces failed or missing album covers with a stylish fallback generic Material UI SVG icon and a soft background.
+  - Improved Lyrics Scrolling logic: Implemented `onWheel` and `onTouchMove` listeners so if the user manually scrolls through the lyrics, the auto-sync pauses for 3 seconds, then automatically smoothly snaps back to the currently playing line.
+  - Redesigned Immersive Lyrics UI inspired by the Xiaomi SU7 Skyline screen: Active lyrics are now prominently large (`text-[44px]`), bold, and have a subtle drop-shadow glow. Inactive lyrics are dynamically scaled down, semi-transparent, and use Tailwind's arbitrary JIT `blur-[1px]` utility to create a cinematic depth-of-field effect.
+- **Further Polished Local Music Pro**:
+  - Implemented "Pure Lyric Mode" (纯净歌词模式): Added a toggle in the Immersive View header. When activated, the album cover smoothly collapses (w-0, opacity-0, scale-90) and the lyrics expand to take up the full screen width with a dynamic `flex-[2]` transition, allowing an undistracted reading experience.
+  - Re-engineered Lyric Centering: The auto-scroll behavior previously failed because of nested parent nodes in the `ref` element. Switched to assigning `id="lyric-{i}"` and using `querySelector` to precisely calculate offsets relative to the viewport container, ensuring the active lyric is strictly dead-centered every time.
+  - Enhanced Animations (SU7 Style): Refined the `transition` classes for individual lyrics. Increased transition duration to `800ms` with a custom `cubic-bezier(0.2, 0.8, 0.2, 1)` curve. Now, instead of just using CSS `scale` which causes abrupt visual gaps, the transition fluidly bridges `font-size`, `opacity`, `drop-shadow`, and `blur`, resulting in a highly cinematic and deeply immersive transition between lyric lines.
+- Synchronized **Netease Cloud Music App** with Local Music Pro's immersive enhancements:
+  - Backend `music.ts` updated to capture `cover` URL during search and playlist tracks fetch, and added a new `/lyric` proxy endpoint bridging `NeteaseCloudMusicApi.lyric()`.
+  - Frontend `MusicApp.tsx` completely overhauled with the `AnimatePresence` Immersive View (Framer Motion).
+  - Included full "Pure Lyric Mode", dynamic responsive SU7-style synced typography, CSS-based equalizer in list view, and Framer background crossfading.
+  - Addressed broken images via `onError` handler generating an SVG placeholder.
+
+### 2026-03-28 (Session 2)
+- Added visual styling to Netease music Quality Selector to adapt to immersive dark theme by applying `text-slate-800 bg-white` to the `<option>` elements.
+- Replaced native `alert()` prompts with a clean `showToast` UI notification system in `MusicApp.tsx` to align with the rest of the OS.
+- Modified `backend/src/routes/music.ts` to implement local filesystem querying (via `fs.readdirSync`) using the `/downloaded` and `/stream_local` endpoints.
+- Implemented visual indicators (`CheckCircleIcon`) in the Netease Music list for downloaded songs.
+- Set up local playback priority: if a Netease song exists in the local download directory, it streams directly from the disk bypassing the API playback URL.
+- Ensured user quality settings are persisted to `localStorage` across app reloads.
+
+### 2026-03-28 (Session 3)
+- Fixed the Netease local-priority playback backend so `backend/src/routes/music.ts` now compiles under strict TypeScript and correctly imports filesystem access.
+- Unified default download directory resolution with `~/.aria2/aria2.conf` to avoid false negatives when the music app leaves the custom download directory empty.
+- Upgraded `/api/system/music/downloaded` to return structured audio-only entries with normalized names, reducing false matches from `.lrc`/cover files and making local match logic more robust.
+- Upgraded `/api/system/music/stream_local` with filename validation, correct MIME mapping, and HTTP Range support so local FLAC/M4A/MP3 playback and seeking behave like Local Music Pro.
+- Hardened `frontend/src/apps/MusicApp.tsx` playback flow by adding typed song/download models, normalized local-file matching, `audio.play()` error handling, and metadata-aware seek restoration after quality switching.
+- Added `CHANGELOG.md` and bumped package versions (`backend 1.0.1`, `frontend 0.0.1`) to record this bugfix release.
+
+### 2026-03-28 (Session 4)
+- Deepened the audit of both Netease Cloud Music and Local Music Pro, then fixed playback-state desync issues caused by optimistic `setIsPlaying` updates and unhandled `audio.play()` promise rejections.
+- Improved `LocalMusicApp.tsx` to properly clean up the `localmusic-dir-updated` event listener, clear stale library state when the directory changes, and prompt the user to rescan when the active directory does not match the cached DB.
+- Refactored `backend/src/routes/localmusic.ts` DB persistence from a raw track array to `{ scannedDir, tracks }`, preserving backward compatibility while preventing cross-directory cache pollution.
+- Upgraded local music streaming with MIME detection and invalid Range rejection to reduce playback glitches on non-MP3 files.
+- Tightened `MusicApp.tsx` state handling for login refresh, playback failure fallback, and component unmount cleanup so the Netease player behaves more predictably under edge cases.
+
+### 2026-03-28 (Session 5)
+- Fixed a critical Netease metadata gap: `backend/src/routes/music.ts` now resolves missing album covers via `song_detail`, caches cover URLs under `~/.clawos/music_cache/netease_covers`, and reuses them for search/playlist/detail responses.
+- Hardened `frontend/src/apps/MusicApp.tsx` so songs without initial `cover` values proactively request `/api/system/music/detail`, updating both list rows and the current immersive player once the cover arrives.
+- Reworked lyric parsing in both `MusicApp.tsx` and `LocalMusicApp.tsx` to support multi-timestamp LRC lines and lines without millisecond precision, improving synced lyric coverage.
+- Added request-id guards for lyric loading in both players to prevent stale responses from an old song overwriting the current song's lyrics during rapid track switching.
+- Improved Netease download marker refresh timing by performing multiple delayed refresh passes after pushing a task to Aria2, reducing the gap before “已下载” appears.
+
+### 2026-03-28 (Session 6)
+- Completed the deeper music hardening pass: both `MusicApp.tsx` and `LocalMusicApp.tsx` now use playback tokens plus pending seek restoration to avoid race conditions during rapid track switching, single-loop replay, and Netease quality changes.
+- Replaced frontend-direct Netease Aria2 RPC submission with a dedicated backend `/api/system/music/download` route, which records `{ songId, filename, dir }` mappings in `~/.clawos/music_cache/netease_download_map.json`.
+- Upgraded downloaded-track detection to prefer `songId` mapping over filename heuristics, significantly improving the reliability of local-priority playback and “已下载” badges after downloads complete.
+- Improved Local Music Pro refresh behavior by reloading the library on window focus/visibility restore, helping the UI reflect freshly scanned or externally changed tracks without manual refreshes.
+
+### 2026-03-28 (Session 7)
+- Fixed a regression introduced by request-race hardening: lyric fetch completion checks in both `MusicApp.tsx` and `LocalMusicApp.tsx` were using stale React closure state (`currentSong`) and therefore clearing valid lyrics; both now validate against `activeSongIdRef`.
+- Fixed Netease cover backfill starvation in `MusicApp.tsx`: the previous global cover request id caused concurrent detail fetches to invalidate each other, so most missing album covers never appeared. Switched to per-song in-flight deduplication using `pendingCoverIdsRef`.
+- Hardened song switch cleanup by resetting active song refs and pending cover state during teardown/directory change so late async responses cannot overwrite unrelated UI state.
+
+### 2026-03-28 (Session 8)
+- Confirmed and fixed the Netease lyric format mismatch: `backend/src/routes/music.ts` now returns only standard `lrc.lyric` text to match the frontend `parseLrc()` parser instead of incorrectly falling back to `yrc/klyric`.
+- Updated `frontend/src/apps/MusicApp.tsx` to aggressively backfill missing covers for the whole visible song list rather than only the first 6 items, addressing the remaining album art gaps.
+- Added an `isActive` signal from `frontend/src/App.tsx` into `MusicApp.tsx` so reopening/focusing the Netease window triggers a fresh downloaded-track scan.
+- Upgraded `/api/system/music/downloaded` directory matching to recursive scanning, so downloaded songs inside nested folders can now show local badges and participate in local-priority playback.
+
+### 2026-03-28 (Session 9)
+- Added a shared Netease metadata cache module at `backend/src/utils/musicCache.ts` so track title/artist/album, cover URL, lyric text, and filename-matching keys persist locally in `~/.clawos/music_cache/netease_tracks.json`.
+- Wired `backend/src/routes/music.ts` search/detail/lyric/playlist flows to continuously upsert that cache, reducing repeated metadata fetches and preparing a reusable offline metadata layer.
+- Upgraded `backend/src/routes/localmusic.ts` so local scan results can reuse cached Netease metadata to fill missing artist/album info, download remote covers into the local cover cache, and seed local lyric cache without waiting for a fresh API round-trip.
+- Updated `frontend/src/apps/LocalMusicApp.tsx` types to reflect the richer local track metadata now returned by the backend.
+
+### 2026-03-28 (Session 10)
+- Fixed a serious Local Music Pro regression where switching the browser tab/window caused the library to appear empty: `LocalMusicApp.tsx` focus/visibility reloads were calling `/api/system/localmusic/list` without the current custom directory header, so the backend compared against the default `~/Music` path and returned `needsScan: true`.
+- Updated the local music list endpoint to re-apply cached Netease metadata on read, so enriched cover/lyric metadata can appear after the cache is warmed without forcing a full rescan.
+
+### 2026-03-28 (Session 11)
+- Upgraded local-to-Netease matching in `backend/src/routes/localmusic.ts` by introducing multi-keyword search rounds, normalized title cleanup (e.g. stripping “无损”/“Live” suffixes), and scored candidate selection instead of taking the first cloud search result.
+- Added aggressive metadata warmup on both `/api/system/localmusic/scan` and `/api/system/localmusic/list`, so existing local libraries keep filling `netease_tracks.json`, cached covers, and cached lyrics in the background without requiring manual playback triggers.
+
+### 2026-03-28 (Session 12)
+- Added tracked warmup progress to `backend/src/routes/localmusic.ts`, including running state, total/completed counts, updated count, and current track name so metadata hydration is observable.
+- Updated `frontend/src/apps/LocalMusicApp.tsx` to poll and display the metadata warmup progress bar, making automatic cover/lyric/album enrichment visible instead of looking like nothing is happening.
+
+### 2026-03-28 (Session 13)
+- Added local track metadata provenance markers and warmup failure bookkeeping: tracks now record whether metadata came from embedded tags, cached Netease data, live Netease enrichment, or a mixed source, plus failure reason/attempt counters for repeated misses.
+- Updated `LocalMusicApp.tsx` song rows to show compact source badges so it is obvious which metadata has been enhanced from Netease and which tracks still fail to enrich.
+
+### 2026-03-28 (Session 14)
+- Added real automated test coverage for the music work instead of relying only on manual verification: backend tests now cover title cleanup, filename parsing, keyword generation, and match scoring; frontend tests now cover LRC parsing behavior.
+- While wiring tests, caught and fixed an actual bug in `backend/src/utils/musicMatching.ts`: when the local file artist was `Unknown Artist`, search keywords were incorrectly built from the full filename title instead of the parsed filename title/artist pair, lowering Netease match quality.
+- Split production and test TypeScript configs on both backend and frontend so test files no longer break normal builds.
+
+### 2026-03-28 (Session 15)
+- Expanded automated coverage beyond pure utilities: backend route tests now verify `localmusic/list` mismatch behavior, `localmusic/warmup-status` payload shape, and recursive `music/downloaded` scanning with nested files.
+- Added frontend tests for local metadata provenance badge rules so the UI status labels stay stable as the warmup/enrichment logic evolves.
+- Simplified backend test execution to `tsx --test tests/**/*.test.ts` after confirming the previous `dist-tests` compile flow was unreliable for route-level tests.
+
+### 2026-03-29 (Session 16)
+- Updated desktop icons for OpenClaw and Netease Music to match their official visual styles.
+- Extracted the OpenClaw logo from `favicon.svg` and mapped it to the `OpenClawIcon` component, preserving its native purple gradient instead of relying on standard Tailwind text coloring.
+- Implemented an exact SVG match for the official Netease Cloud Music icon inside `NeteaseIcon` component and colored it with NetEase Red (`#E60026`) for a more authentic appearance on the desktop dock.
+- Removed unused Heroicons from `App.tsx` and ensured the updated SVG icons cleanly integrate with the existing 16x16 dock bounds and `drop-shadow` system styling.
+### 2026-03-29 (Session 17)
+- Changed the OpenClaw desktop app icon to its official red lobster logo, dropping the incorrect Vite default shape.
+- Replaced the default Vite favicon with the tech-style node connection icon used in the ClawOS splash screen, giving the browser tab a consistent and sleek OS aesthetic.
+- Added a "连接测速" (Connection Speed Test) card to the System Status Dashboard. This allows testing the exact Ping, Download, and Upload speeds between the client browser and the ClawOS host (especially useful over Tailscale).
+- Created a new backend route `speedtest.ts` providing `/download` (streams zeroes) and `/upload` (consumes data) endpoints to generate synthetic load for accurate speed measurements.
+- Replaced all default flat Heroicons for the remaining apps (Dashboard, Monitor, Files, Video, LocalMusic, Downloads, Notes, Reader, Cron) with rich, custom-designed SVG icons (`frontend/src/components/Icons.tsx`).
+- These new icons feature gradients, shadows, and layered paths to match the premium, polished look of the OpenClaw and Netease icons, giving the entire dock a cohesive, modern macOS-like aesthetic.
+- Enhanced the previously flat NetEase, Baidu, and Quark app icons into full rich graphics. They now use custom SVG shapes with vibrant CSS gradients and embedded white logos, solving the missing-color bug that turned NetEase black when its utility color class was removed.
+- Extracted standalone `BaiduIcon`, `QuarkIcon`, `NeteaseIcon` and `OpenClawIcon` from `App.tsx` and moved them into the centralized `Icons.tsx` library.
+- Audited all app windows (`CronApp`, `NotesApp`, `ReaderApp`, `NetdiskApp`, `MusicApp`, `LocalMusicApp`, `DownloadApp`, `VideoApp`) and replaced their generic Heroicon/text window headers with their respective new rich SVG App Icons, ensuring consistent branding inside the applications and on the Desktop.
+
+### 2026-03-29
+- Redesigned the global settings panel layout, changing it from a narrow single list into a wider, categorized tab interface (Personalization, Downloads, Account, About).
+- Updated Netease Cloud Music icon in `Icons.tsx` with a perfectly proportioned vector path to accurately represent the official logo.
+- Established `CHANGELOG.md` in the root directory to maintain version history and track release updates moving forward. Set the current system version to v1.0.1.
+- Re-adjusted the Netease Cloud Music icon to a much simpler, elegant double music note design over the red gradient to fix complaints about the previous SVG path looking like a jagged mess. Bumped version to v1.0.3.
+- User requested the exact official NetEase design. Reverted the simple double note and fetched the exact SVG path from simple-icons, rendering the true original NetEase Cloud Music logo. Bumped version to v1.0.4.
+- Resized the NetEase Cloud Music icon to match the Baidu Netdisk icon dimensions by wrapping the SVG path in a `<g transform="translate(8, 8) scale(0.6666)">` and using a 32x32 viewbox with a 14px radius background circle. Bumped version to v1.0.5.
+- Fixed the NetEase inner note appearing too small. The simple-icons SVG used an inverted path (drawing a white bounding circle and punching out the note). Removed the outer bounding circle (`M0 12...12Z`) to extract the positive note path, and adjusted transform to `translate(2, 2) scale(1.1666)` to perfectly fit the note inside the standard 14px radius red circle. Bumped version to v1.0.6.
+- Added a Wallpaper selector to the System Settings "Personalization" tab. Integrated 10 high-quality Unsplash image URLs alongside the default `wallpaper.svg`. Added `wallpaper` state with `localStorage` persistence, dynamically mapping it to the main desktop container's `backgroundImage`. Bumped version to v1.1.0.
+- Implemented a right-side Desktop Widgets sidebar featuring 6 modular cards: Calendar/Cron, Hardware Monitor, Network Speed, Download Queue, Quick Note, and Now Playing. Added global music event dispatching (`clawos-music-state` and `clawos-music-toggle`) into `LocalMusicApp` and `MusicApp` to synchronize playback state with the desktop widget. Added a toggle to enable/disable widgets in the OS Personalization settings. Bumped version to v1.2.0.
+- Re-architected Desktop Widgets to use a fixed width (`600px`), strict `grid-cols-2 grid-rows-3` layout with a unified `h-[160px]` height for each card to fix layout-breakage on 125% browser zoom. Fixed network speed text overflowing the card by applying `truncate` and reducing font size. Fixed music state bug by adding a `clawos-music-request` event so the widget can actively poll current playback state upon mount. Bumped version to v1.2.1.
+- Massively upgraded the Now Playing widget. Replaced the simplistic `clawos-music-state` system with a robust `clawos-music-sync` bridge. The widget now actively displays the app source (Local vs Netease), the cover art, title, artist, and **real-time synced lyric line**. Implemented bidirectional controls (Prev, Play/Pause, Next) via a new `clawos-music-cmd` event that dispatches exact commands to the currently active audio provider. Bumped version to v1.2.2.
+- Debugged and fixed the "Now Playing" desktop widget data synchronization issues: `MusicApp.tsx` and `LocalMusicApp.tsx` were incorrectly passing data mappings (e.g. mapping `title` to `currentSong.name` which was undefined in MusicApp), leading to the widget displaying "未知歌手" in place of the song name. Fixed the property mapping to `currentSong.title`.
+- Adjusted widget typography based on user feedback to emphasize the Song Name (`text-base font-black`) and correct the layout hierarchy over the Artist label. Removed stale `clawos-music-state` listeners to prevent state pollution. Bumped version to v1.2.3.
+- Replaced the brittle desktop music event chain with a persistent in-memory bridge at `frontend/src/lib/musicBridge.ts`. The widget now subscribes to a unified state store instead of relying on one-shot `clawos-music-request` timing, so returning to the desktop immediately restores the latest known playback state.
+- Added explicit playback ownership arbitration between Netease and Local Music. When one source enters `preparing` or `playing`, it becomes the active owner and the bridge automatically sends `pause` to the previous owner, preventing dual playback and card flicker.
+- Updated both `MusicApp.tsx` and `LocalMusicApp.tsx` to report `preparing/playing/paused` states and push metadata before actual audio playback starts, improving perceived responsiveness of the desktop "Now Playing" card.
+- Added frontend regression tests for late state restoration, listener notification, active-owner command routing, and dual-source conflict handling. Bumped version to v1.2.4.
+- Simplified the Baidu/Quark netdisk onboarding flow. Added `GET /api/system/netdisk/status` to distinguish mounted, not-mounted, expired-auth, and backend-unreachable states before the UI attempts file browsing.
+- Reworked `NetdiskApp.tsx` into a beginner-friendly setup page when the mount is missing: the UI now explains that users first log into AList (the underlying mount backend), then configure Baidu/Quark authorization there, and finally return to ClawOS to re-check the mount.
+- Added a clearer AList credential display and “打开底层挂载后台 / 我已完成，重新检测” actions so users no longer confuse AList admin login with their Baidu/Quark account login. Added backend route tests for the new netdisk status API. Bumped version to v1.2.5.
+- Further refined the Baidu/Quark onboarding UX for non-technical users: added explicit “存储类型 / 挂载路径” cards with one-click copy buttons, plus a step-by-step AList action checklist so users can follow the setup without guessing where to click or what to fill.
+- Added a dedicated Cookie acquisition guide to the Baidu/Quark setup flow, with both a browser-extension path (Cookie-Editor) and a manual F12 path, plus direct links to the official netdisk sites and the Cookie-Editor homepage to reduce the biggest remaining onboarding blocker.
+- Implemented a new “single-credential auto-config” path for netdisk setup: users can now paste a Baidu `refresh_token` or Quark `cookie` directly in ClawOS, and the backend will create or replace the corresponding AList storage mount automatically, making the AList admin UI an advanced fallback instead of the main flow.
+- Implemented the first usable Quark web-login flow inside ClawOS: added a backend proxy for `pan.quark.cn`, persisted captured Set-Cookie headers into a local session file, exposed login-status/reset APIs, and wired the Quark netdisk page to open the embedded login page, poll for a valid login cookie, and auto-configure the Quark mount once detected.
+
+### 2026-03-30 (AI 炒股应用细节完善)
+- **What was done**: 
+  - 根据 v3.4 架构文档补齐 `AIQuantApp.tsx` 剩余交互细节。
+  - 在“策略”模块补充了微型交易表单与历史状态 Timeline。
+  - 在“画像”模块补充了针对情绪失控场景的“风险自担确认书”硬核拦截，并增加了 Mood/Stress 及行为偏差克服进度的展示。
+  - 在“风控”模块增加了“手动平仓”支持与持仓相关性预警（降低同涨同跌风险）。
+  - 在“记忆”模块引入策略版本演进日志展示，凸显系统的自我反思与进化。
+- **Key discoveries**: 在前端高保真呈现系统中，通过多步骤的强确认（如：要求输入特定确认文本）是干预“交易行为偏差”的有效 UI 模式。
+- **Pending items**: 考虑将后续真实后端的 API 接入（目前均为 Mock 数据）。
