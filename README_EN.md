@@ -4,15 +4,15 @@
 
 # ClawOS
 
-### Your Personal Cloud Desktop, Running in a Browser
+### AI-Powered High Win-Rate Stock Trading + Personal Cloud Desktop
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
-A self-hosted Web OS that brings a desktop-like experience to your browser.  
-AI-powered stock analysis, media streaming, file management, notes, RSS feeds — all in one place.
+45 AI experts vote on every trade. 10 real trades, **90% win rate**, avg **+3.19%** per trade.  
+Also a self-hosted Web OS — media, files, notes, RSS feeds — all in one desktop.
 
 **[> 中文文档 / Chinese Docs](README.md)**
 
@@ -31,24 +31,16 @@ AI-powered stock analysis, media streaming, file management, notes, RSS feeds �
 <p><em>↑ ClawOS AI Stock Trading risk control panel screenshot (2026-04-13, live trading data)</em></p>
 </div>
 
-### Highlight: Market Down, AI Pick Surges +17.42%
-
-**2026-04-13** — The A-share market was broadly declining, with the CSI 500 index down -4.67% over the past 20 days. ClawOS AI issued a **Strong Buy** signal for Tianhua New Energy (300390) — 45 AI experts voted, composite score 80.08, the Trend Trading Expert gave 99% confidence.
-
-Result: **Tianhua New Energy surged +17.42% that day**, profitable from the moment of purchase.
-
-> This isn't hindsight. The signal was generated pre-market, the user confirmed the trade, and the system recorded the entire decision chain.
-
 ### Performance Summary
 
-Since system launch on 2026-04-04, **8 round-trip trades** (buy → sell) completed across 6 A-share stocks:
+Since system launch on 2026-04-04, **10 round-trip trades** (buy → sell) completed across 7 A-share stocks:
 
 ```
-Win rate: 87.5%  (7 out of 8 trades profitable, only 1 loss)
-Avg return: +1.71% per trade
+Win rate: 90.0%  (9 out of 10 trades profitable, only 1 loss)
+Avg return: +3.19% per trade
 Avg holding period: 2 trading days
 Only loss: Hengtong Optic-Electric -4.33% (disciplined stop-loss exit)
-Best single trade: Accelink Technologies +6.94%
+Best single trade: Tianhua New Energy +12.33% (trade #9)
 Best single-day gain: Tianhua New Energy +17.42% (bought on 04-13)
 ```
 
@@ -64,10 +56,18 @@ Best single-day gain: Tianhua New Energy +17.42% (bought on 04-13)
 | 6 | Hengtong Optic | 600487 | 59.99 | 57.39 | **-4.33%** | 1d | 04-09 → 04-10 |
 | 7 | Accelink Tech | 002281 | 106.79 | 114.20 | **+6.94%** | 3d | 04-10 → 04-13 |
 | 8 | Robotechnik | 300757 | 492.95 | 493.66 | **+0.14%** | 4d | 04-09 → 04-13 |
+| 9 | Tianhua New Energy | 300390 | 73.58 | 77.96 | **+5.95%** | 1d | 04-13 → 04-14 |
+| 10 | Tianhua New Energy | 300390 | 77.14 | 86.65 | **+12.33%** | 1d | 04-15 → 04-16 |
 
-> **Current position**: Tianhua New Energy (300390), cost basis 73.58, current price 80.20, **unrealized +9.00%**, second take-profit level triggered.
->
-> **+17.42% on the day of purchase**, surging against a declining market.
+> **Current positions**: Biwin Storage (688525) and Huafeng Tech (688629), both bought on 04-17.
+
+### Highlight: Market Down, AI Pick Surges +17.42%
+
+**2026-04-13** — The A-share market was broadly declining, with the CSI 500 index down -4.67% over the past 20 days. ClawOS AI issued a **Strong Buy** signal for Tianhua New Energy (300390) — 45 AI experts voted, composite score 80.08, the Trend Trading Expert gave 99% confidence.
+
+Result: **Tianhua New Energy surged +17.42% that day**, profitable from the moment of purchase. Two subsequent trades on this stock returned +5.95% and +12.33%.
+
+> This isn't hindsight. The signal was generated pre-market, the user confirmed the trade, and the system recorded the entire decision chain.
 
 ### How Does It Work?
 
@@ -82,7 +82,7 @@ This isn't luck — it's systematic risk discipline:
 
 ---
 
-## Why ClawOS?
+## More Than Stock Trading: A Full Cloud Desktop
 
 Most self-hosted dashboards give you a grid of bookmarks. ClawOS gives you an **actual desktop** — with draggable windows, a macOS-style dock, desktop widgets, wallpapers, and 15 integrated apps that talk to each other.
 
@@ -90,8 +90,8 @@ It's designed for **one person**: you. Single-user, single-machine, zero cloud d
 
 ### Highlights
 
+- **AI Stock Analysis** — Full A-share market stock selection, multi-expert voting, position risk control, memory & replay, automated pre-market analysis
 - **Full Desktop Shell** — Dock, window management, wallpapers, notification center, system tray
-- **AI Stock Analysis** — A-share market signals, multi-expert voting, position risk control, performance replay
 - **Media Center** — NetEase Cloud Music streaming, local music library, video search & HLS playback
 - **Productivity Suite** — Markdown notes with rich-text editor, Dida365 (TickTick) integration, RSS daily briefings
 - **File & Cloud** — FileBrowser for local files, Baidu & Quark cloud drives via AList
@@ -115,7 +115,8 @@ Browser ──> ClawOS (:3001)
 | **Frontend** | React 19 + Vite 8 + TypeScript + Tailwind CSS 4 + Zustand + Framer Motion |
 | **Backend** | Node.js + Express 5 + TypeScript + Winston logging |
 | **Editor** | Tiptap (rich-text note editor) |
-| **Integrations** | OpenClaw, FileBrowser, AList, Aria2, NetEase Music API, AKShare (Python) |
+| **AI Stock Selection** | 45 AI experts (30 LLM + 15 rule-based), AKShare (Python) data collection |
+| **Integrations** | OpenClaw, FileBrowser, AList, Aria2, NetEase Music API |
 
 ## Quick Start
 
@@ -129,8 +130,8 @@ Browser ──> ClawOS (:3001)
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/gumustudio/ClawOS.git
-cd ClawOS
+git clone https://github.com/gumustudio/ClawOS-HighWinningStock.git
+cd ClawOS-HighWinningStock
 npm install --prefix frontend
 npm install --prefix backend
 ```
@@ -163,7 +164,7 @@ echo "CLAWOS_PASSWORD=your_password" > ~/.clawos/.env
 
 | App | Description |
 |---|---|
-| **AI Quant** | A-share market signals, multi-model expert voting, position management, risk control, memory & replay |
+| **AI Quant** | Full A-share market stock selection, multi-model expert voting, position management, risk control, memory & replay |
 | **System Status** | Real-time CPU/RAM/disk/network monitoring as desktop widgets |
 | **Service Monitor** | Health dashboard for all systemd services |
 | **OpenClaw** | Embedded AI gateway via reverse proxy (zero-invasion to the original project) |
