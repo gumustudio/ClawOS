@@ -2906,7 +2906,7 @@ function getAdjustedFusionWeights(
   baseWeights: StockAnalysisFusionWeights,
   learnedWeights: StockAnalysisLearnedWeights | null,
 ): StockAnalysisFusionWeights {
-  if (!learnedWeights || learnedWeights.sampleCount < MIN_REVIEWS_FOR_LEARNING) return baseWeights
+  if (!learnedWeights || !learnedWeights.adjustmentFactors || learnedWeights.sampleCount < MIN_REVIEWS_FOR_LEARNING) return baseWeights
   const adj = learnedWeights.adjustmentFactors
   const rawExpert = baseWeights.expert + adj.expert
   const rawTechnical = baseWeights.technical + adj.technical
@@ -3722,8 +3722,8 @@ async function buildModelGroupPerformance(stockAnalysisDir: string, expertPerfor
     allSignals.push(...signals)
   }
 
-  const allVotes = allSignals.flatMap((s) => s.expert.votes ?? [])
-  const hasRealVotes = allVotes.length > 0 && allSignals.some((s) => !s.expert.isSimulated)
+  const allVotes = allSignals.flatMap((s) => s.expert?.votes ?? [])
+  const hasRealVotes = allVotes.length > 0 && allSignals.some((s) => !s.expert?.isSimulated)
 
   if (!hasRealVotes) {
     const baseConfidence = allSignals.length === 0 ? 0.6 : average(allSignals.map((signal) => signal.confidence))
@@ -3762,8 +3762,8 @@ async function buildModelGroupPerformance(stockAnalysisDir: string, expertPerfor
     const mapping = modelProviderMap.get(modelId)
     if (!mapping || mapping.providerIds.length === 0) return { providerId: '', providerName: '' }
     if (mapping.providerIds.length === 1) return { providerId: mapping.providerIds[0], providerName: mapping.providerNames[0] }
-    // 多供应商时无法确定，标注为"多供应商"
-    return { providerId: '', providerName: mapping.providerNames.join('/') }
+    // 多供应商时无法确定，不拼接，按纯 modelId 分组
+    return { providerId: '', providerName: '' }
   }
 
   // 构建分组键：providerId/modelId 或仅 modelId（旧数据无 provider 时）
