@@ -214,8 +214,14 @@ router.get('/health', async (_req, res) => {
   }
 })
 
-router.post('/run/daily', async (_req, res) => {
+// v1.35.0 [A6-P0-3] 长任务路由 HTTP 超时（30 分钟，覆盖 daily/postMarket 最坏耗时）
+const LONG_TASK_TIMEOUT_MS = 30 * 60 * 1000
+
+router.post('/run/daily', async (req, res) => {
   try {
+    // v1.35.0 [A6-P0-3] HTTP 超时设置
+    req.setTimeout(LONG_TASK_TIMEOUT_MS)
+    res.setTimeout(LONG_TASK_TIMEOUT_MS)
     const data = await runStockAnalysisDaily(await getStockAnalysisDir())
     res.json({ success: true, data })
   } catch (error) {
@@ -227,9 +233,12 @@ router.post('/run/daily', async (_req, res) => {
 /**
  * 一键自动执行：对今日信号执行自动买入（强烈买入）+ 自动忽略（买入/观望）
  * 不接券商，仅写入 positions/trades/signals JSON 文件
+ * v1.35.0 [A6-P0-2] runAutoDecisions 已在 service 层加 in-flight 锁
  */
 router.post('/auto-execute', async (req, res) => {
   try {
+    req.setTimeout(LONG_TASK_TIMEOUT_MS)
+    res.setTimeout(LONG_TASK_TIMEOUT_MS)
     const tradeDate = typeof req.body?.tradeDate === 'string' ? req.body.tradeDate : undefined
     const data = await runAutoDecisions(await getStockAnalysisDir(), tradeDate)
     res.json({ success: true, data })
@@ -614,8 +623,11 @@ router.post('/ai-config/test-model', async (req, res) => {
 
 // ==================== 盘后分析 (G1) ====================
 
-router.post('/run/post-market', async (_req, res) => {
+router.post('/run/post-market', async (req, res) => {
   try {
+    // v1.35.0 [A6-P0-3] HTTP 超时
+    req.setTimeout(LONG_TASK_TIMEOUT_MS)
+    res.setTimeout(LONG_TASK_TIMEOUT_MS)
     const data = await runStockAnalysisPostMarket(await getStockAnalysisDir())
     res.json({ success: true, data })
   } catch (error) {

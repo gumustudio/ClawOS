@@ -357,7 +357,30 @@ function closeSocketSet(socketSet: Set<Socket>, gracefulDelayMs: number) {
 }
 
 // Middleware
-app.use(cors());
+// v1.35.0 [A6-P0-1] CORS 收口：原默认 cors() 允许任意 origin（通配），现改为白名单。
+// 由于 server 只监听 127.0.0.1（line 692），实际网络风险有限，
+// 但仍收口 origin 白名单 + credentials:true 来防止未来部署变更时的 CSRF 风险。
+const CORS_ORIGIN_WHITELIST = [
+  'http://localhost:5173',
+  'http://localhost:3001',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:3001',
+];
+app.use(cors({
+  origin: (origin, callback) => {
+    // 允许无 origin 请求（同源 / curl / 代理内部调用）
+    if (!origin || CORS_ORIGIN_WHITELIST.includes(origin)) {
+      return callback(null, true);
+    }
+    // Tailscale Funnel / ClawOS 内网域名 — 允许 *.ts.net 和 http://localhost
+    if (/^https?:\/\/[\w-]+\.ts\.net$/.test(origin) || origin.startsWith('http://localhost')) {
+      return callback(null, true);
+    }
+    logger.warn(`CORS 拒绝：非白名单 origin=${origin}`, { module: 'Server' });
+    return callback(new Error(`Origin ${origin} not allowed by CORS`));
+  },
+  credentials: true,
+}));
 
 // Serve static frontend files FIRST - no authentication needed to load the UI
 const frontendPath = path.resolve(__dirname, '../../frontend/dist');

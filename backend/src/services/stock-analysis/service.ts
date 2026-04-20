@@ -205,6 +205,12 @@ let currentRunPromise: Promise<StockAnalysisDailyRunResult> | null = null
 let currentPostMarketPromise: Promise<StockAnalysisPostMarketResult> | null = null
 let intradayMonitorTimer: ReturnType<typeof setInterval> | null = null
 
+// v1.35.0 [A5-P0-1/2 + A6-P0-2] 长任务 in-flight 锁
+// 防止 morningSupplement / autoDecisions / intradayPoll 重复触发烧 LLM token
+let currentSupplementPromise: Promise<void> | null = null
+let currentAutoDecisionsPromise: Promise<unknown> | null = null
+let intradayPollInFlight = false
+
 /** P0-3: 交易操作（开仓/平仓/减仓）共用的互斥锁 key，防止并发竞态 */
 const TRADING_LOCK_KEY = '__trading_operations_lock__'
 
@@ -4819,7 +4825,7 @@ export async function runStockAnalysisPostMarket(
  * 只运行 Phase 4（数据采集）+ Phase 5（LLM 信息提取），不重复跑持仓评估和风控。
  * 采集结果合并到前一个交易日的事实池和 LLM 提取结果中，供当天盘前分析使用。
  */
-export async function runMorningSupplementAnalysis(stockAnalysisDir: string): Promise<void> {
+async function runMorningSupplementAnalysisInner(stockAnalysisDir: string): Promise<void> {
   await ensureStockAnalysisStructure(stockAnalysisDir)
   const startMs = Date.now()
   const today = todayDate()
@@ -4900,6 +4906,21 @@ export async function runMorningSupplementAnalysis(stockAnalysisDir: string): Pr
     saLog.error('Service', `[晨间补充] 流程异常: ${(error as Error).message} 耗时=${elapsedMs}ms`)
     throw error
   }
+}
+
+/**
+ * v1.35.0 [A5-P0-1] 晨间补充的对外入口：加 in-flight 锁防止重复触发烧 LLM token
+ */
+export async function runMorningSupplementAnalysis(stockAnalysisDir: string): Promise<void> {
+  if (currentSupplementPromise) {
+    saLog.info('Service', `[晨间补充] 已有任务进行中，跳过本次触发`)
+    return currentSupplementPromise
+  }
+  currentSupplementPromise = runMorningSupplementAnalysisInner(stockAnalysisDir)
+    .finally(() => {
+      currentSupplementPromise = null
+    })
+  return currentSupplementPromise
 }
 
 // ==================== S1: 盘中实时监控 ====================
@@ -5116,12 +5137,20 @@ export async function startIntradayMonitor(stockAnalysisDir: string): Promise<In
   await pollIntradayOnce(stockAnalysisDir)
 
   // 开启定时器
+  // v1.35.0 [A5-P0-4] 加 in-flight 锁：防止两次 tick 重叠执行造成 intraday/status.json race
   intradayMonitorTimer = setInterval(() => {
     if (!isWithinTradingHours()) {
       logger.info('[stock-analysis] [盘中] 非交易时段，跳过轮询', { module: 'StockAnalysis' })
       return
     }
-    void pollIntradayOnce(stockAnalysisDir)
+    if (intradayPollInFlight) {
+      saLog.debug('Service', `[盘中] 上次轮询未完成，跳过本次 tick`)
+      return
+    }
+    intradayPollInFlight = true
+    void pollIntradayOnce(stockAnalysisDir).finally(() => {
+      intradayPollInFlight = false
+    })
   }, DEFAULT_INTRADAY_POLL_INTERVAL_MS)
 
   logger.info('[stock-analysis] [盘中] 监控已启动', { module: 'StockAnalysis' })
@@ -5784,7 +5813,7 @@ export async function refreshSignalsRealtime(
  *
  * @param tradeDate 指定交易日（YYYY-MM-DD），默认 today
  */
-export async function runAutoDecisions(stockAnalysisDir: string, tradeDate?: string) {
+async function runAutoDecisionsInner(stockAnalysisDir: string, tradeDate?: string) {
   const targetDate = tradeDate || todayDate()
   const dailySignals = await readStockAnalysisSignals(stockAnalysisDir, targetDate)
   if (!dailySignals || dailySignals.length === 0) {
@@ -5881,6 +5910,23 @@ export async function runAutoDecisions(stockAnalysisDir: string, tradeDate?: str
     autoIgnored,
     skipped,
   }
+}
+
+/**
+ * v1.35.0 [A6-P0-2] 自动决策执行入口：加 in-flight 锁，防止 cron 09:31 与手动按钮并发触发
+ * 两次触发会并行执行买入逻辑，造成重复开仓或 LLM token 浪费。
+ */
+export async function runAutoDecisions(stockAnalysisDir: string, tradeDate?: string) {
+  if (currentAutoDecisionsPromise) {
+    saLog.info('Service', `[自动决策] 已有任务进行中，跳过本次触发 tradeDate=${tradeDate ?? 'today'}`)
+    return currentAutoDecisionsPromise as ReturnType<typeof runAutoDecisionsInner>
+  }
+  const promise = runAutoDecisionsInner(stockAnalysisDir, tradeDate)
+    .finally(() => {
+      currentAutoDecisionsPromise = null
+    })
+  currentAutoDecisionsPromise = promise
+  return promise
 }
 
 export async function closeStockAnalysisPosition(stockAnalysisDir: string, positionId: string, request: StockAnalysisTradeRequest) {

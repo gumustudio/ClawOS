@@ -63,6 +63,66 @@ function isLastDayOfMonth(): boolean {
   return tomorrow.getDate() === 1
 }
 
+/**
+ * v1.35.0 [A5-P0-3] 启动时补跑错过的 cron 任务
+ *
+ * 如果进程在盘前 08:05、盘中 09:25 或盘后 16:00 时段挂掉了，重启后这些任务当天不会再跑。
+ * 本函数检测：
+ *   1. 今天是否是交易日
+ *   2. 当前北京时间是否已过某个 cron 时间点
+ *   3. 该任务今天是否已完成（通过 hasCronCompletedToday 或 lastRunAt）
+ * 如果都满足「该跑但没跑」则立即补跑一次。
+ */
+async function runMissedCronTasksOnStartup(): Promise<void> {
+  if (!isTradingDay()) {
+    saLog.info('scheduler', '启动补跑：今日非交易日，跳过')
+    return
+  }
+
+  const now = new Date()
+  const beijingStr = now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false })
+  const [hourStr, minuteStr] = beijingStr.split(':')
+  const hhmm = Number(hourStr) * 100 + Number(minuteStr)
+  saLog.info('scheduler', `启动补跑检查：当前北京时间 ${beijingStr} (hhmm=${hhmm})`)
+
+  // 盘前每日分析（08:05，补跑窗口 08:05 ~ 15:00，在盘前或盘中启动都可补跑）
+  if (hhmm >= 805 && hhmm < 1500 && !hasCronCompletedToday('daily')) {
+    try {
+      const dir = await getStockAnalysisDir()
+      saLog.info('scheduler', `[补跑] 检测到 08:05 daily 任务未完成，立即补跑`)
+      await runStockAnalysisDaily(dir)
+      markCronCompletedToday('daily')
+      saLog.info('scheduler', '[补跑] daily 补跑完成')
+    } catch (error) {
+      saLog.error('scheduler', `[补跑] daily 失败：${(error as Error).message}`)
+    }
+  }
+
+  // 盘后分析（16:00）— 只在 16:00 ~ 23:59 之间才补跑（避开跨日边界）
+  if (hhmm >= 1600 && !hasCronCompletedToday('postMarket')) {
+    try {
+      const dir = await getStockAnalysisDir()
+      saLog.info('scheduler', `[补跑] 检测到 16:00 postMarket 任务未完成，立即补跑`)
+      await runStockAnalysisPostMarket(dir)
+      markCronCompletedToday('postMarket')
+      saLog.info('scheduler', '[补跑] postMarket 补跑完成')
+    } catch (error) {
+      saLog.error('scheduler', `[补跑] postMarket 失败：${(error as Error).message}`)
+    }
+  }
+
+  // 盘中监控（09:25 - 15:05）— 只有在交易时段内重启时才启动
+  if (hhmm >= 925 && hhmm < 1505) {
+    try {
+      const dir = await getStockAnalysisDir()
+      saLog.info('scheduler', `[补跑] 当前在交易时段，启动盘中监控`)
+      await startIntradayMonitor(dir)
+    } catch (error) {
+      saLog.error('scheduler', `[补跑] 盘中监控启动失败：${(error as Error).message}`)
+    }
+  }
+}
+
 export function initStockAnalysisScheduler() {
   if (initialized || process.env.NODE_ENV === 'test') {
     return
@@ -94,6 +154,8 @@ export function initStockAnalysisScheduler() {
           })
           .then(() => {
             saLog.info('scheduler', '启动: 业务预热完成')
+            // v1.35.0 [A5-P0-3] 启动补跑：如果进程在 cron 时间点已过但今天未完成，立即补跑
+            return runMissedCronTasksOnStartup()
           })
           .catch((error) => {
             const msg = (error as Error).message
