@@ -155,7 +155,7 @@ export function autoExecuteDailyStrategy(tradeDate?: string) {
   })
 }
 
-export function closeStockAnalysisPosition(positionId: string, payload: { quantity: number; price?: number; note?: string }) {
+export function closeStockAnalysisPosition(positionId: string, payload: { price?: number; note?: string } = {}) {
   return requestJson<StockAnalysisTradeRecord>(`/api/system/stock-analysis/positions/${positionId}/close`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -163,7 +163,7 @@ export function closeStockAnalysisPosition(positionId: string, payload: { quanti
   })
 }
 
-export function reduceStockAnalysisPosition(positionId: string, payload: { quantity: number; price?: number; note?: string }) {
+export function reduceStockAnalysisPosition(positionId: string, payload: { weightDelta: number; price?: number; note?: string }) {
   return requestJson<StockAnalysisTradeRecord>(`/api/system/stock-analysis/positions/${positionId}/reduce`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

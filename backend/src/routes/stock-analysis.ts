@@ -266,10 +266,10 @@ router.post('/stock-pool/refresh', async (_req, res) => {
 
 router.post('/signals/:id/confirm', async (req, res) => {
   try {
-    const rawQty = req.body?.quantity != null ? Number(req.body.quantity) : 0
+    // v1.34.0: 百分比仓位模型 — quantity 为占位（默认 1），仓位由 weight 决定
     const rawWeight = req.body?.weight != null ? Number(req.body.weight) : undefined
-    // [P2-26] A 股最小交易单位为 100 股（1 手），自动对齐到 100 的整数倍
-    const quantity = Number.isFinite(rawQty) && rawQty > 0 ? Math.floor(rawQty / 100) * 100 : 0
+    const rawQty = req.body?.quantity != null ? Number(req.body.quantity) : 1
+    const quantity = Number.isFinite(rawQty) && rawQty > 0 ? Math.max(1, Math.floor(rawQty)) : 1
 
     const data = await confirmStockAnalysisSignal(await getStockAnalysisDir(), req.params.id, {
       quantity,
@@ -324,14 +324,9 @@ router.post('/signals/:id/ignore', async (req, res) => {
 
 router.post('/positions/:id/close', async (req, res) => {
   try {
-    const rawQty = Number(req.body?.quantity)
-    // [P2-26] 平仓数量对齐到 100 股整数倍
-    const quantity = Number.isFinite(rawQty) && rawQty > 0 ? Math.floor(rawQty / 100) * 100 : 0
-    if (quantity <= 0) {
-      return res.status(400).json({ success: false, error: '数量必须为正数且至少 100 股' })
-    }
+    // v1.34.0: 百分比仓位模型 — 平仓即卖出整个持仓，不再传 quantity
     const data = await closeStockAnalysisPosition(await getStockAnalysisDir(), req.params.id, {
-      quantity,
+      closeAll: true,
       price: sanitizePrice(req.body?.price),
       note: sanitizeNote(req.body?.note),
     })
@@ -347,14 +342,13 @@ router.post('/positions/:id/close', async (req, res) => {
 
 router.post('/positions/:id/reduce', async (req, res) => {
   try {
-    const rawQty = Number(req.body?.quantity)
-    // [P2-26] 减仓数量对齐到 100 股整数倍
-    const quantity = Number.isFinite(rawQty) && rawQty > 0 ? Math.floor(rawQty / 100) * 100 : 0
-    if (quantity <= 0) {
-      return res.status(400).json({ success: false, error: '减仓数量必须为正数且至少 100 股' })
+    // v1.34.0: 百分比仓位模型 — 按 weight 比例减仓
+    const rawWeightDelta = Number(req.body?.weightDelta)
+    if (!Number.isFinite(rawWeightDelta) || rawWeightDelta <= 0 || rawWeightDelta >= 1) {
+      return res.status(400).json({ success: false, error: 'weightDelta 必须为 (0,1) 区间的小数（如 0.05 表示 5%）' })
     }
     const data = await reduceStockAnalysisPosition(await getStockAnalysisDir(), req.params.id, {
-      quantity,
+      weightDelta: rawWeightDelta,
       price: sanitizePrice(req.body?.price),
       note: sanitizeNote(req.body?.note),
     })

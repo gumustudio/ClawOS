@@ -5357,7 +5357,7 @@ export async function confirmStockAnalysisSignal(
 
   const isBuySignal = signal.action === 'strong_buy' || signal.action === 'buy'
   const isWatchOrNone = signal.action === 'watch' || signal.action === 'none'
-  const hasQuantity = request.quantity > 0
+  const hasQuantity = (request.quantity ?? 0) > 0
 
   // watch/none 确认 + 无数量 = 仅标记已阅，不创建持仓（不需要交易时间校验）
   if (isWatchOrNone && !hasQuantity) {
@@ -5493,7 +5493,7 @@ export async function confirmStockAnalysisSignal(
         }
       }
     }
-    const quantity = request.quantity
+    const quantity = request.quantity ?? 1
     const openedAt = nowIso()
     const sourceDecision: DecisionSource = options?.autoBuy
       ? 'system_auto_buy'
@@ -5698,8 +5698,9 @@ export async function runAutoDecisions(stockAnalysisDir: string, tradeDate?: str
       continue
     }
     const targetWeight = round(Math.min(SINGLE_WEIGHT, remaining), 4)
-    // quantity 占位（不算钱不算股数，仅满足后端必填校验）：用 1 股最小占位
-    // 注：后续如果接真实交易，这里需要换成 weight × 总资产 ÷ price 的真实股数
+    // v1.34.0: 系统采用百分比仓位模型（weight），无真实股数概念。
+    // quantity 为占位字段（=1），仅为兼容历史 trade 记录的 quantity 字段保留。
+    // 切勿对 quantity 做"100 股整手对齐"等校验，会破坏交易能力。
     const placeholderQty = 1
     try {
       const result = await confirmStockAnalysisSignal(
@@ -5786,7 +5787,7 @@ export async function closeStockAnalysisPosition(stockAnalysisDir: string, posit
         price = position.currentPrice
       }
     }
-    const quantity = request.quantity
+    const quantity = position.quantity // 沿用持仓占位股数仅为审计兼容
     const pnlPercent = round(safeDivide(price - position.costPrice, position.costPrice) * 100)
     const sellReason = request.note?.trim() || `用户手动平仓 ${pnlPercent > 0 ? '盈利' : '亏损'} ${pnlPercent}%`
     const soldAt = nowIso()
@@ -5849,9 +5850,13 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
     if (!position) return null
     assertPositionCanSellToday(position)
 
-    const sellQuantity = request.quantity
-    if (sellQuantity >= position.quantity) {
-      throw new Error(`减仓数量 (${sellQuantity}) 必须小于持仓数量 (${position.quantity})，如需全部卖出请使用平仓`)
+    // v1.34.0: 改为按 weight 比例减仓（百分比仓位模型）
+    const weightDelta = typeof request.weightDelta === 'number' ? request.weightDelta : 0
+    if (!(weightDelta > 0)) {
+      throw new Error(`减仓失败：weightDelta 必须为正数（当前=${weightDelta}）`)
+    }
+    if (weightDelta >= position.weight) {
+      throw new Error(`减仓比例 (${(weightDelta * 100).toFixed(2)}%) 必须小于持仓比例 (${(position.weight * 100).toFixed(2)}%)，如需全部卖出请使用平仓`)
     }
 
     const [trades, runtimeStatus] = await Promise.all([
@@ -5875,8 +5880,10 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
     }
 
     const pnlPercent = round(safeDivide(price - position.costPrice, position.costPrice) * 100)
-    const remainingQuantity = position.quantity - sellQuantity
-    const remainingWeight = round(position.weight * (remainingQuantity / position.quantity), 4)
+    const remainingWeight = round(position.weight - weightDelta, 4)
+    // quantity 占位字段：按比例切分，仅用于历史 trade 记录展示
+    const sellQuantity = Math.max(1, Math.round(position.quantity * (weightDelta / position.weight)))
+    const remainingQuantity = Math.max(1, position.quantity - sellQuantity)
     const soldAt = nowIso()
 
     const trade: StockAnalysisTradeRecord = {
@@ -5887,10 +5894,10 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
       tradeDate: soldAt,
       price,
       quantity: sellQuantity,
-      weight: round(position.weight - remainingWeight, 4),
+      weight: weightDelta,
       sourceSignalId: position.sourceSignalId,
       sourceDecision: 'user_confirmed',
-      note: request.note?.trim() || `用户减仓 ${sellQuantity}股 (剩余${remainingQuantity}股) ${pnlPercent > 0 ? '盈利' : '亏损'} ${pnlPercent}%`,
+      note: request.note?.trim() || `用户减仓 ${(weightDelta * 100).toFixed(2)}% 仓位 (剩余${(remainingWeight * 100).toFixed(2)}%) ${pnlPercent > 0 ? '盈利' : '亏损'} ${pnlPercent}%`,
       relatedPositionId: position.id,
       pnlPercent,
       buyDate: position.openedAt,
@@ -5904,7 +5911,7 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
       currentPrice: price,
       returnPercent: pnlPercent,
       action: 'reduce',
-      actionReason: `减仓 ${sellQuantity}股 @ ${price.toFixed(2)}`,
+      actionReason: `减仓 ${(weightDelta * 100).toFixed(2)}% 仓位 @ ${price.toFixed(2)}`,
     }
 
     const updatedPositions = positions.map((item) => item.id === positionId ? updatedPosition : item)
@@ -5923,7 +5930,7 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
       await saveStockAnalysisRiskEvents(stockAnalysisDir, [...riskResult.newEvents, ...existingEvents])
     }
 
-    saLog.audit('Service', `position reduced: ${position.code} sold=${sellQuantity} remaining=${remainingQuantity} price=${price} pnl=${pnlPercent}%`)
+    saLog.audit('Service', `position reduced: ${position.code} weightDelta=${weightDelta} remainingWeight=${remainingWeight} price=${price} pnl=${pnlPercent}%`)
     return trade
   })
 }

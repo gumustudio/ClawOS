@@ -504,7 +504,12 @@ export interface StockAnalysisDailyRunResult {
 }
 
 export interface StockAnalysisTradeRequest {
-  quantity: number
+  /** @deprecated 仓位以 weight (0-1) 表示，无真实股数。保留仅为兼容旧调用方。 */
+  quantity?: number
+  /** 减仓时使用：要卖出的仓位比例（0-1），如 0.05 表示卖掉总仓位 5% */
+  weightDelta?: number
+  /** 平仓时使用：true 表示卖出整个持仓 */
+  closeAll?: boolean
   weight?: number
   price?: number
   note?: string

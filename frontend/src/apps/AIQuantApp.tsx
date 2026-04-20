@@ -656,7 +656,6 @@ export default function AIQuantApp() {
     setActionLoading(true)
     try {
       const trade = await closeStockAnalysisPosition(position.id, {
-        quantity: position.quantity,
         note: `用户按风控建议手动平仓 ${position.name}`,
       })
       await loadOverview()
@@ -691,7 +690,7 @@ export default function AIQuantApp() {
         riskTone: position.action === 'stop_loss' ? 'critical' : 'high',
         summary: '该操作会一次性卖出当前持仓，执行后不可撤销。',
         bullets: [
-          `卖出数量：${position.quantity} 股`,
+          `卖出仓位：${(position.weight * 100).toFixed(2)}% （全部）`,
           `当前收益：${position.returnPercent.toFixed(2)}%`,
           `当前动作建议：${positionLabel(position.action)}`,
           `动作原因：${position.actionReason}`,
@@ -707,16 +706,17 @@ export default function AIQuantApp() {
     await executePositionClose(position)
   }
 
-  async function executePositionReduce(position: StockAnalysisPosition, reduceQuantity: number) {
+  async function executePositionReduce(position: StockAnalysisPosition, weightDelta: number) {
     setActionLoading(true)
     try {
+      const reducePct = (weightDelta * 100).toFixed(2)
       const trade = await reduceStockAnalysisPosition(position.id, {
-        quantity: reduceQuantity,
-        note: `用户减仓 ${position.name} ${reduceQuantity}股`,
+        weightDelta,
+        note: `用户减仓 ${position.name} ${reducePct}% 仓位`,
       })
       await loadOverview()
-      showToast('success', `${position.name} 已减仓 ${reduceQuantity} 股`)
-      void safeNotify('持仓已减仓', `${position.name}（${position.code}）减仓 ${reduceQuantity} 股${trade.pnlPercent != null ? `，本次收益 ${trade.pnlPercent.toFixed(2)}%` : ''}`, 'info', {
+      showToast('success', `${position.name} 已减仓 ${reducePct}% 仓位`)
+      void safeNotify('持仓已减仓', `${position.name}（${position.code}）减仓 ${reducePct}% 仓位${trade.pnlPercent != null ? `，本次收益 ${trade.pnlPercent.toFixed(2)}%` : ''}`, 'info', {
         dedupeKey: `reduce-position:${position.id}:${trade.id}`,
         riskPriority: 'high',
         category: 'execution',
@@ -736,10 +736,10 @@ export default function AIQuantApp() {
     }
   }
 
-  async function submitPositionReduce(position: StockAnalysisPosition, reduceQuantity: number) {
+  async function submitPositionReduce(position: StockAnalysisPosition, weightDelta: number) {
     if (overview && !tradeConfirmState) {
       const capturedPosition = position
-      const capturedReduceQuantity = reduceQuantity
+      const capturedWeightDelta = weightDelta
       setTradeConfirmState({
         kind: 'reduce',
         title: `确认减仓 ${position.name}（${position.code}）`,
@@ -747,20 +747,20 @@ export default function AIQuantApp() {
         riskTone: 'high',
         summary: '该操作会部分卖出当前持仓，请确认是否符合你的止盈/控仓计划。',
         bullets: [
-          `减仓数量：${reduceQuantity} 股`,
-          `持仓总量：${position.quantity} 股`,
+          `减仓比例：${(weightDelta * 100).toFixed(2)}% 仓位`,
+          `当前持仓：${(position.weight * 100).toFixed(2)}% 仓位`,
           `当前收益：${position.returnPercent.toFixed(2)}%`,
           `当前动作建议：${positionLabel(position.action)}`,
           `动作原因：${position.actionReason}`,
         ],
         onConfirm: async () => {
           setTradeConfirmState(null)
-          await executePositionReduce(capturedPosition, capturedReduceQuantity)
+          await executePositionReduce(capturedPosition, capturedWeightDelta)
         },
       })
       return
     }
-    await executePositionReduce(position, reduceQuantity)
+    await executePositionReduce(position, weightDelta)
   }
 
   async function submitPositionDismiss(position: StockAnalysisPosition) {

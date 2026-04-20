@@ -187,7 +187,7 @@ export function MemoryTab({ overview, config }: { overview: StockAnalysisOvervie
                         <span className="text-[10px] text-slate-400">{trade.code}</span>
                       </div>
                       <div className="text-[10px] text-slate-400 mt-0.5 truncate">
-                        {tradeTimeSummary(trade)} · {trade.quantity}股 · {tradeHoldingDays(trade)}天
+                        {tradeTimeSummary(trade)} · {Math.round((trade.weight ?? 0) * 100)}%仓 · {tradeHoldingDays(trade)}天
                       </div>
                     </div>
                     <div className="text-right flex-shrink-0">

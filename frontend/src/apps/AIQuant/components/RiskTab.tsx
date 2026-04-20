@@ -208,7 +208,7 @@ function SystemRiskPanel({ riskControl, limits }: { riskControl: StockAnalysisRi
 }
 
 /** 事中风控面板 — 个股持仓监控（含移动止损） */
-function InTradePanel({ overview, onClosePosition, onReducePosition, actionLoading, tradingStatus }: { overview: StockAnalysisOverview; onClosePosition: (position: StockAnalysisPosition) => void; onReducePosition: (position: StockAnalysisPosition, quantity: number) => void; actionLoading: boolean; tradingStatus: { canTrade: boolean; reason: string | null } }) {
+function InTradePanel({ overview, onClosePosition, onReducePosition, actionLoading, tradingStatus }: { overview: StockAnalysisOverview; onClosePosition: (position: StockAnalysisPosition) => void; onReducePosition: (position: StockAnalysisPosition, weightDelta: number) => void; actionLoading: boolean; tradingStatus: { canTrade: boolean; reason: string | null } }) {
   const evaluations = overview.positionEvaluations ?? []
   const evalMap = new Map(evaluations.map((ev) => [ev.positionId, ev]))
 
@@ -244,11 +244,11 @@ function InTradePanel({ overview, onClosePosition, onReducePosition, actionLoadi
                     <span className={`text-base font-bold ${percentTone(position.returnPercent)}`}>
                       {formatPercent(position.returnPercent)}
                     </span>
-                    {position.quantity > 100 ? (
+                    {position.weight >= 0.02 ? (
                       <button
                         disabled={actionLoading || !tradingStatus.canTrade || tPlusOneBlocked}
                         title={tradeBlockedReason}
-                        onClick={() => onReducePosition(position, Math.floor(position.quantity / 2 / 100) * 100)}
+                        onClick={() => onReducePosition(position, position.weight / 2)}
                         className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 rounded text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         减半
@@ -428,7 +428,7 @@ function RiskEventTimeline({ events }: { events: StockAnalysisRiskEvent[] }) {
 
 /* ---------- 主组件 ---------- */
 
-export function RiskTab({ overview, onClosePosition, onReducePosition, actionLoading, tradingStatus }: { overview: StockAnalysisOverview; onClosePosition: (position: StockAnalysisPosition) => void; onReducePosition: (position: StockAnalysisPosition, quantity: number) => void; actionLoading: boolean; tradingStatus: { canTrade: boolean; reason: string | null } }) {
+export function RiskTab({ overview, onClosePosition, onReducePosition, actionLoading, tradingStatus }: { overview: StockAnalysisOverview; onClosePosition: (position: StockAnalysisPosition) => void; onReducePosition: (position: StockAnalysisPosition, weightDelta: number) => void; actionLoading: boolean; tradingStatus: { canTrade: boolean; reason: string | null } }) {
   const totalPosition = overview.positions.reduce((sum, position) => sum + position.weight, 0)
   const riskControl = overview.systemStatus.riskControl
   const limits = overview.riskLimits ?? DEFAULT_LIMITS

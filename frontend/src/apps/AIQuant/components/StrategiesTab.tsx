@@ -39,7 +39,7 @@ export interface StrategiesTabProps {
   actionLoading: boolean
   onSelectSignal: (signal: StockAnalysisSignal) => void
   onClosePosition: (position: StockAnalysisPosition) => void
-  onReducePosition: (position: StockAnalysisPosition, reduceQuantity: number) => void
+  onReducePosition: (position: StockAnalysisPosition, weightDelta: number) => void
   onDismissAction: (position: StockAnalysisPosition) => void
   tradingStatus: { canTrade: boolean; reason: string | null }
   onAutoExecute: () => void
@@ -130,7 +130,7 @@ export function StrategiesTab(props: StrategiesTabProps) {
                         <div className="text-xs text-red-600 mt-0.5">{sell.summary}</div>
                         <div className="text-xs text-slate-500 mt-0.5">
                           收益 <span className={position.returnPercent >= 0 ? 'text-red-600' : 'text-green-600'}>{position.returnPercent.toFixed(2)}%</span>
-                          {' · '}持仓 {position.quantity} 股
+                          {' · '}仓位 {(position.weight * 100).toFixed(2)}%
                         </div>
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
@@ -138,10 +138,10 @@ export function StrategiesTab(props: StrategiesTabProps) {
                           <>
                             <button
                               onClick={() => {
-                                const qty = Math.floor(position.quantity / 2 / 100) * 100
-                                if (qty > 0) onReducePosition(position, qty)
+                                const weightDelta = position.weight / 2
+                                if (weightDelta > 0) onReducePosition(position, weightDelta)
                               }}
-                              disabled={actionLoading || position.quantity < 200}
+                              disabled={actionLoading || position.weight < 0.02}
                               className="px-3 py-1.5 text-xs font-medium bg-amber-500 hover:bg-amber-600 text-white rounded-lg disabled:opacity-50"
                             >
                               减半
