@@ -23,6 +23,8 @@ import {
   readStockAnalysisMonthlySummary,
   readStockAnalysisPerformanceDashboard,
   readStockAnalysisPositions,
+  readStockAnalysisDailyEquity,
+  upsertDailyEquitySnapshot,
   readStockAnalysisQuoteCache,
   readStockAnalysisReviews,
   readStockAnalysisRiskEvents,
@@ -95,6 +97,7 @@ import type {
   DecisionSource,
   MarketLiquidity,
   MarketRegime,
+  DailyEquitySnapshot,
   MarketSentiment,
   MarketStyle,
   MarketTrend,
@@ -2304,6 +2307,14 @@ async function buildSignal(snapshot: StockAnalysisStockSnapshot, marketState: St
   const baseCompositeScore = Math.max(0, Math.min(100, compositeScore))
   const finalScore = baseCompositeScore
   let action: StockAnalysisSignal['action'] = 'none'
+
+  // v1.35.0 [A3-P0-3] LLM 全降级保护：当 expert.isSimulated=true（所有 LLM 模型均失败，30 个规则 fallback）时
+  // 强制降级 action 为 watch，禁止自动买入流程消费 strong_buy/buy 信号。
+  // 规则 fallback 是同一份 snapshot 微扰产生的 30 个 vote，不构成真正的 ensemble 共识。
+  if (expert.isSimulated === true) {
+    vetoReasons.push('LLM 全降级（所有模型不可用，仅规则引擎 fallback），禁止自动买入')
+  }
+
   if (vetoReasons.length > 0) action = 'watch'
   else if (finalScore >= 80) action = 'strong_buy'
   else if (finalScore >= thresholds.minCompositeScore) action = 'buy'
@@ -2422,11 +2433,23 @@ function updatePositionRuntime(position: StockAnalysisPosition, quote: StockAnal
 }
 
 function calculatePerformance(trades: StockAnalysisTradeRecord[]) {
-  const sells = trades.filter((trade) => trade.action === 'sell' && typeof trade.pnlPercent === 'number')
+  const sells = trades
+    .filter((trade) => trade.action === 'sell' && typeof trade.pnlPercent === 'number')
+    .sort((a, b) => new Date(a.tradeDate).getTime() - new Date(b.tradeDate).getTime())
   const wins = sells.filter((trade) => (trade.pnlPercent ?? 0) > 0).length
   const winRate = sells.length === 0 ? 0 : wins / sells.length
-  // 累计收益：简单求和（与 weeklyReturn/monthlyReturn 语义一致，避免加权平均在少量交易时反直觉）
-  const cumulativeReturn = round(sells.reduce((sum, trade) => sum + (trade.pnlPercent ?? 0), 0))
+  // v1.35.0 [A8-P0-2] 累计收益改为复合：equity_t = equity_{t-1} * (1 + weight_t * pnlPct_t / 100)
+  // 按百分比仓位模型，每笔交易影响"账户净值"的比例 = weight × 单笔收益率
+  // 最终累计收益 = (equity_final / 1) - 1，以百分比显示。
+  // 这是金融上正确的复合回报语义，旧版简单求和（12.33% + -10% = 2.33%）在量级上存在错误（正确应为 1.10%）。
+  let equity = 1
+  for (const trade of sells) {
+    const weight = typeof trade.weight === 'number' && trade.weight > 0 ? trade.weight : 1
+    const pnlPct = (trade.pnlPercent ?? 0) / 100
+    // 注意：weight 是"这笔交易对账户净值的暴露比例"（0-1），复利仅作用于该暴露部分
+    equity *= (1 + weight * pnlPct)
+  }
+  const cumulativeReturn = round((equity - 1) * 100)
   return { winRate: round(winRate, 4), cumulativeReturn }
 }
 
@@ -2460,6 +2483,66 @@ function evaluateMarketLevelRisk(marketState: StockAnalysisMarketState, config: 
     newPositionsAllowed,
     buyAllowed,
     checkedAt: nowIso(),
+  }
+}
+
+/**
+ * v1.35.0 [A8-P0-3] 构建当日 daily-equity 快照
+ *
+ * 百分比仓位模型下的净值计算：
+ *   - totalEquity：按 trades 复利连乘（与 calculatePerformance 一致）
+ *   - exposure：当前所有未平仓 positions 的 weight 之和
+ *   - floatingReturnPct：Σ(position.weight × position.returnPercent)，反映未平仓浮动盈亏
+ *   - realizedReturnPct：当日平仓交易的 Σ(weight × pnlPercent)
+ *   - drawdownPct：totalEquity 相对历史峰值的回撤
+ */
+function buildDailyEquitySnapshot(
+  date: string,
+  positions: StockAnalysisPosition[],
+  trades: StockAnalysisTradeRecord[],
+  existingEquity: DailyEquitySnapshot[],
+): DailyEquitySnapshot {
+  // 计算 totalEquity（累计复利，与 calculatePerformance 一致）
+  const sells = trades
+    .filter((t) => t.action === 'sell' && typeof t.pnlPercent === 'number')
+    .sort((a, b) => new Date(a.tradeDate).getTime() - new Date(b.tradeDate).getTime())
+  let totalEquity = 1
+  for (const trade of sells) {
+    const weight = typeof trade.weight === 'number' && trade.weight > 0 ? trade.weight : 1
+    const pnlPct = (trade.pnlPercent ?? 0) / 100
+    totalEquity *= (1 + weight * pnlPct)
+  }
+
+  // 当日已平仓收益
+  const todaySells = sells.filter((t) => t.tradeDate.slice(0, 10) === date)
+  let realizedReturnPct = 0
+  for (const t of todaySells) {
+    const weight = typeof t.weight === 'number' && t.weight > 0 ? t.weight : 1
+    realizedReturnPct += weight * (t.pnlPercent ?? 0)
+  }
+
+  // 未平仓浮动盈亏 + 暴露率
+  let exposure = 0
+  let floatingReturnPct = 0
+  for (const pos of positions) {
+    const weight = typeof pos.weight === 'number' && pos.weight > 0 ? pos.weight : 0
+    exposure += weight
+    floatingReturnPct += weight * (pos.returnPercent ?? 0)
+  }
+
+  // 回撤（相对历史峰值）
+  const historicalPeak = existingEquity.reduce((peak, item) => Math.max(peak, item.totalEquity), totalEquity)
+  const drawdownPct = historicalPeak > 0 ? round(((historicalPeak - totalEquity) / historicalPeak) * 100) : 0
+
+  return {
+    date,
+    totalEquity: round(totalEquity, 6),
+    exposure: round(exposure, 4),
+    floatingReturnPct: round(floatingReturnPct, 4),
+    realizedReturnPct: round(realizedReturnPct, 4),
+    drawdownPct,
+    positionCount: positions.length,
+    generatedAt: nowIso(),
   }
 }
 
@@ -4676,6 +4759,18 @@ export async function runStockAnalysisPostMarket(
       // Phase 6: 保存市场状态 + 更新运行时状态
       assertWithinPostMarketWindow(postMarketStart, maxDurationMs, 'Phase 6 保存前')
       await saveStockAnalysisMarketState(stockAnalysisDir, marketState)
+
+      // v1.35.0 [A8-P0-3] 写入 daily-equity 快照
+      try {
+        const freshPositions = await readStockAnalysisPositions(stockAnalysisDir)
+        const freshTrades = await readStockAnalysisTrades(stockAnalysisDir)
+        const existingEquity = await readStockAnalysisDailyEquity(stockAnalysisDir)
+        const snapshot = buildDailyEquitySnapshot(tradeDate, freshPositions, freshTrades, existingEquity)
+        await upsertDailyEquitySnapshot(stockAnalysisDir, snapshot)
+        saLog.info('Service', `[盘后] daily-equity 快照已保存 date=${snapshot.date} totalEquity=${snapshot.totalEquity} exposure=${snapshot.exposure} drawdown=${snapshot.drawdownPct}%`)
+      } catch (error) {
+        logger.error(`[stock-analysis] [盘后] daily-equity 快照失败（不影响盘后结果）: ${(error as Error).message}`, { module: 'StockAnalysis' })
+      }
 
       const result: StockAnalysisPostMarketResult = {
         tradeDate,

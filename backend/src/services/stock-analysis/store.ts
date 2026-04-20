@@ -7,6 +7,7 @@ import type {
   AutoReportNotification,
   DataAgentConfigItem,
   DataAgentConfigStore,
+  DailyEquitySnapshot,
   ExpertDailyMemoryEntry,
   ExpertMemoryStore,
   FactPool,
@@ -329,6 +330,11 @@ function getPositionsPath(stockAnalysisDir: string) {
   return path.join(stockAnalysisDir, 'portfolio', 'positions.json')
 }
 
+// v1.35.0 [A8-P0-3] 账户净值快照（每日收盘后写入，用于回撤/年化/Calmar 计算）
+function getDailyEquityPath(stockAnalysisDir: string) {
+  return path.join(stockAnalysisDir, 'portfolio', 'daily-equity.json')
+}
+
 function getTradesPath(stockAnalysisDir: string) {
   return path.join(stockAnalysisDir, 'journal', 'trades.json')
 }
@@ -612,6 +618,35 @@ export async function readStockAnalysisPositions(stockAnalysisDir: string) {
 
 export async function saveStockAnalysisPositions(stockAnalysisDir: string, positions: StockAnalysisPosition[]) {
   await writeJson(getPositionsPath(stockAnalysisDir), positions)
+}
+
+// v1.35.0 [A8-P0-3] daily-equity 快照读写
+const MAX_DAILY_EQUITY_DAYS = 400 // 保留约 1.5 年的净值序列
+
+export async function readStockAnalysisDailyEquity(stockAnalysisDir: string): Promise<DailyEquitySnapshot[]> {
+  await ensureStockAnalysisStructure(stockAnalysisDir)
+  return readJson<DailyEquitySnapshot[]>(getDailyEquityPath(stockAnalysisDir), [])
+}
+
+export async function saveStockAnalysisDailyEquity(stockAnalysisDir: string, equity: DailyEquitySnapshot[]): Promise<void> {
+  // 按日期升序保存，只保留最近 MAX_DAILY_EQUITY_DAYS 天
+  const sorted = [...equity]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-MAX_DAILY_EQUITY_DAYS)
+  await writeJson(getDailyEquityPath(stockAnalysisDir), sorted)
+}
+
+/**
+ * v1.35.0 [A8-P0-3] 追加/替换当日 daily-equity 条目（按 date 唯一性去重）
+ */
+export async function upsertDailyEquitySnapshot(
+  stockAnalysisDir: string,
+  snapshot: DailyEquitySnapshot,
+): Promise<void> {
+  const existing = await readStockAnalysisDailyEquity(stockAnalysisDir)
+  const filtered = existing.filter((item) => item.date !== snapshot.date)
+  filtered.push(snapshot)
+  await saveStockAnalysisDailyEquity(stockAnalysisDir, filtered)
 }
 
 export async function readStockAnalysisTrades(stockAnalysisDir: string) {

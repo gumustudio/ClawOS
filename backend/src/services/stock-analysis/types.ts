@@ -281,6 +281,35 @@ export interface StockAnalysisPosition {
   lastTradeAt?: string
 }
 
+/**
+ * v1.35.0 [A8-P0-3] 账户净值日快照
+ * 每个交易日收盘后写入一条，供回撤 / 年化 / Calmar / 暴露率计算使用。
+ * 百分比仓位模型下：
+ *   - totalEquity：以起始 1.0 为基准的净值（累计复利）
+ *   - exposure：当日所有持仓的 weight 之和（0-1）
+ *   - floatingReturnPct：当日未平仓浮盈浮亏（weight 加权）
+ *   - realizedReturnPct：当日已平仓收益（weight 加权）
+ *   - drawdownPct：距离历史峰值回撤百分比
+ */
+export interface DailyEquitySnapshot {
+  /** 快照日期（北京日期 YYYY-MM-DD） */
+  date: string
+  /** 基准净值（起始=1.0） */
+  totalEquity: number
+  /** 当日持仓 weight 之和 */
+  exposure: number
+  /** 浮动盈亏百分比（未平仓 weighted return） */
+  floatingReturnPct: number
+  /** 已实现盈亏百分比（当日平仓 weighted return） */
+  realizedReturnPct: number
+  /** 距离历史峰值回撤百分比 */
+  drawdownPct: number
+  /** 当日有效持仓数 */
+  positionCount: number
+  /** 快照生成时间 */
+  generatedAt: string
+}
+
 export interface StockAnalysisTradeRecord {
   id: string
   action: TradeAction
