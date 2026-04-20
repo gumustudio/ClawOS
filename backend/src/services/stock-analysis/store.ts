@@ -502,8 +502,33 @@ export async function readRecentFactPools(stockAnalysisDir: string, limit: numbe
   return pools.filter((pool): pool is FactPool => Boolean(pool))
 }
 
+/**
+ * v1.35.0 [A3-P0-1] 保存信号文件：保留用户已操作的决策状态
+ * 同日 daily 重跑时，已有 decisionSource ∈ {user_confirmed, user_rejected, user_ignored, user_override} 的信号
+ * 必须保留其用户态字段（decisionSource/userDecisionNote/realtime/dismissedAt），只覆盖系统推断的 system 信号。
+ * 否则用户已确认过的信号会被重置为 system，可被再次触发自动/手动买入，造成重复开仓。
+ */
 export async function saveStockAnalysisSignals(stockAnalysisDir: string, tradeDate: string, signals: StockAnalysisSignal[]) {
-  await writeJson(getSignalPath(stockAnalysisDir, tradeDate), signals)
+  const filePath = getSignalPath(stockAnalysisDir, tradeDate)
+  const existing = await readJson<StockAnalysisSignal[]>(filePath, [])
+  const existingMap = new Map(existing.map((s) => [s.id, s]))
+  const USER_DECISIONS = new Set(['user_confirmed', 'user_rejected', 'user_ignored', 'user_override'])
+
+  const merged = signals.map((newSignal) => {
+    const old = existingMap.get(newSignal.id)
+    if (!old) return newSignal
+    // 已有用户决策时，保留用户态字段
+    if (USER_DECISIONS.has(old.decisionSource)) {
+      return {
+        ...newSignal,
+        decisionSource: old.decisionSource,
+        userDecisionNote: old.userDecisionNote,
+        // realtime 由盘中 cron 独立维护，保留新值即可
+      }
+    }
+    return newSignal
+  })
+  await writeJson(filePath, merged)
   await pruneOldDateFiles(path.join(stockAnalysisDir, 'signals'), '', MAX_SIGNAL_DAYS)
 }
 

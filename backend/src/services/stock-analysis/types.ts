@@ -277,6 +277,8 @@ export interface StockAnalysisPosition {
   actionReason: string
   /** 用户已忽略的 action 类型，防止 overview 重新计算时覆盖 dismiss 状态 */
   dismissedAction?: PositionAction | null
+  /** v1.35.0 [A4-P0-2] 最近一次交易操作时间戳（ISO），用于减仓/平仓幂等窗口 */
+  lastTradeAt?: string
 }
 
 export interface StockAnalysisTradeRecord {
@@ -513,6 +515,8 @@ export interface StockAnalysisTradeRequest {
   weight?: number
   price?: number
   note?: string
+  /** v1.35.0 [A4-P0-2] 前端生成的幂等令牌，60 秒内相同 nonce 视为重复提交 */
+  clientNonce?: string
 }
 
 export interface StockAnalysisDecisionRequest {

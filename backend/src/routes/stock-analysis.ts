@@ -325,10 +325,15 @@ router.post('/signals/:id/ignore', async (req, res) => {
 router.post('/positions/:id/close', async (req, res) => {
   try {
     // v1.34.0: 百分比仓位模型 — 平仓即卖出整个持仓，不再传 quantity
+    // v1.35.0 [A4-P0-2] 透传 clientNonce 用于幂等校验
+    const clientNonce = typeof req.body?.clientNonce === 'string' && req.body.clientNonce.trim().length > 0
+      ? req.body.clientNonce.trim().slice(0, 64)
+      : undefined
     const data = await closeStockAnalysisPosition(await getStockAnalysisDir(), req.params.id, {
       closeAll: true,
       price: sanitizePrice(req.body?.price),
       note: sanitizeNote(req.body?.note),
+      clientNonce,
     })
     if (!data) {
       return res.status(404).json({ success: false, error: '持仓不存在' })
@@ -347,10 +352,15 @@ router.post('/positions/:id/reduce', async (req, res) => {
     if (!Number.isFinite(rawWeightDelta) || rawWeightDelta <= 0 || rawWeightDelta >= 1) {
       return res.status(400).json({ success: false, error: 'weightDelta 必须为 (0,1) 区间的小数（如 0.05 表示 5%）' })
     }
+    // v1.35.0 [A4-P0-2] 透传 clientNonce 用于幂等校验（前端 uuid v4）
+    const clientNonce = typeof req.body?.clientNonce === 'string' && req.body.clientNonce.trim().length > 0
+      ? req.body.clientNonce.trim().slice(0, 64)
+      : undefined
     const data = await reduceStockAnalysisPosition(await getStockAnalysisDir(), req.params.id, {
       weightDelta: rawWeightDelta,
       price: sanitizePrice(req.body?.price),
       note: sanitizeNote(req.body?.note),
+      clientNonce,
     })
     if (!data) {
       return res.status(404).json({ success: false, error: '持仓不存在' })

@@ -205,6 +205,15 @@ let intradayMonitorTimer: ReturnType<typeof setInterval> | null = null
 /** P0-3: 交易操作（开仓/平仓/减仓）共用的互斥锁 key，防止并发竞态 */
 const TRADING_LOCK_KEY = '__trading_operations_lock__'
 
+// v1.35.0 [A4-P0-2] 减仓幂等性缓存：clientNonce → 首次执行时间戳
+// 60 秒内相同 nonce 直接拒绝；超过 200 条时按时间过期清理
+const reduceIdempotencyCache = new Map<string, { ts: number; positionId: string }>()
+
+// v1.35.0 test-only：绕过交易时段校验，用于单元测试（不影响生产环境）
+function isTradingHoursBypassedForTests(): boolean {
+  return process.env.NODE_ENV === 'test' && process.env.SA_BYPASS_TRADING_HOURS === '1'
+}
+
 
 interface EastmoneySpotItem {
   f12: string
@@ -5141,13 +5150,24 @@ export async function getStockAnalysisOverview(stockAnalysisDir: string): Promis
   const stockPool = await readStockAnalysisStockPool(stockAnalysisDir)
   const quoteEnvelope = positions.length > 0 ? await getQuoteData(stockAnalysisDir, positions.map((position) => position.code)) : { data: new Map<string, StockAnalysisSpotQuote>(), fetchedAt: runtimeStatus.quoteCacheAt, usedFallback: false, staleReasons: [] }
 
-  const livePositions = positions.map((position) => {
-    const quote = quoteEnvelope.data.get(position.code)
-    if (!quote) return position
-    return updatePositionRuntime(position, quote, config)
-  })
-  if (JSON.stringify(livePositions) !== JSON.stringify(positions)) {
-    await saveStockAnalysisPositions(stockAnalysisDir, livePositions)
+  // v1.35.0 [A2-P0-1] 修复 dashboard race 幽灵持仓：
+  // 在 TRADING_LOCK_KEY 锁内重新读取 positions（可能已被 close/reduce 修改），
+  // 只更新行情运行时字段（currentPrice / returnPercent / action / highestPriceSinceOpen），
+  // 永不基于陈旧快照整体覆写 positions.json。
+  let livePositions = positions
+  if (positions.length > 0) {
+    livePositions = await withFileLock(TRADING_LOCK_KEY, async () => {
+      const fresh = await readStockAnalysisPositions(stockAnalysisDir)
+      const updated = fresh.map((position) => {
+        const quote = quoteEnvelope.data.get(position.code)
+        if (!quote) return position
+        return updatePositionRuntime(position, quote, config)
+      })
+      if (JSON.stringify(updated) !== JSON.stringify(fresh)) {
+        await saveStockAnalysisPositions(stockAnalysisDir, updated)
+      }
+      return updated
+    })
   }
 
   const tradeDate = snapshot?.tradeDate ?? runtimeStatus.latestSuccessfulSignalDate ?? runtimeStatus.latestSignalDate ?? todayDate()
@@ -5377,7 +5397,7 @@ export async function confirmStockAnalysisSignal(
   }
 
   // Fix 2: 涉及实际买入的操作必须在交易时间内（自动买入流程可旁路）
-  if (!options?.bypassTradingHours) {
+  if (!options?.bypassTradingHours && !isTradingHoursBypassedForTests()) {
     const tradingCheck = checkTradingAvailability()
     if (!tradingCheck.canTrade) {
       throw new Error(`当前不可交易：${tradingCheck.reason}`)
@@ -5431,8 +5451,15 @@ export async function confirmStockAnalysisSignal(
       }
     }
 
+    // v1.35.0 [A3-P0-2] 强制校验 weight：NaN/Infinity/负值/零/超界 全部拒绝，不做静默 clamp
     const requestedWeight = request.weight ?? signal.suggestedPosition
-    const targetWeight = round(Math.max(0.01, requestedWeight), 4)
+    if (!Number.isFinite(requestedWeight)) {
+      throw new Error(`weight 非法（NaN/Infinity）：${requestedWeight}`)
+    }
+    if (requestedWeight <= 0 || requestedWeight > 1) {
+      throw new Error(`weight 必须在 (0, 1] 区间，收到 ${requestedWeight}`)
+    }
+    const targetWeight = round(requestedWeight, 4)
     if (targetWeight > config.maxSinglePosition) {
       throw new Error(`单只股票仓位不能超过 ${(config.maxSinglePosition * 100).toFixed(0)}%`)
     }
@@ -5752,9 +5779,11 @@ export async function runAutoDecisions(stockAnalysisDir: string, tradeDate?: str
 
 export async function closeStockAnalysisPosition(stockAnalysisDir: string, positionId: string, request: StockAnalysisTradeRequest) {
   // Fix 2: 平仓必须在交易时间内
-  const tradingCheck = checkTradingAvailability()
-  if (!tradingCheck.canTrade) {
-    throw new Error(`当前不可交易：${tradingCheck.reason}`)
+  if (!isTradingHoursBypassedForTests()) {
+    const tradingCheck = checkTradingAvailability()
+    if (!tradingCheck.canTrade) {
+      throw new Error(`当前不可交易：${tradingCheck.reason}`)
+    }
   }
 
   // P0-3: 交易操作加互斥锁
@@ -5763,12 +5792,43 @@ export async function closeStockAnalysisPosition(stockAnalysisDir: string, posit
     const position = positions.find((item) => item.id === positionId)
     if (!position) return null
     assertPositionCanSellToday(position)
+
+    // v1.35.0 [A4-P0-2] 幂等性保护：同一仓位 2 秒内重复平仓直接拒绝
+    if (position.lastTradeAt) {
+      const elapsed = Date.now() - new Date(position.lastTradeAt).getTime()
+      if (elapsed < 2000) {
+        throw new Error(`平仓操作过于频繁（${elapsed}ms 内），请稍后再试`)
+      }
+    }
+    // v1.35.0 [A4-P0-2] clientNonce 幂等
+    if (request.clientNonce) {
+      const seen = reduceIdempotencyCache.get(request.clientNonce)
+      if (seen && Date.now() - seen.ts < 60_000) {
+        throw new Error(`平仓请求重复提交（clientNonce=${request.clientNonce.slice(0, 8)}...），已拒绝`)
+      }
+    }
+
     const [trades, config, runtimeStatus, existingReviews] = await Promise.all([
       readStockAnalysisTrades(stockAnalysisDir),
       readStockAnalysisConfig(stockAnalysisDir),
       readStockAnalysisRuntimeStatus(stockAnalysisDir),
       readStockAnalysisReviews(stockAnalysisDir),
     ])
+
+    // v1.35.0 [A4-P0-1] 风控暂停校验：paused=true 时禁止平仓，保护资金
+    if (runtimeStatus.riskControl?.paused) {
+      const vetoEvent: StockAnalysisRiskEvent = {
+        id: `risk-veto_paused-close-${Date.now()}`,
+        timestamp: nowIso(),
+        eventType: 'veto_paused',
+        reason: `系统风控已暂停交易，禁止平仓 ${position.name}(${position.code})：${runtimeStatus.riskControl.pauseReason ?? '未知原因'}`,
+        metrics: {},
+        relatedCode: position.code,
+      }
+      const existingEvents = await readStockAnalysisRiskEvents(stockAnalysisDir)
+      await saveStockAnalysisRiskEvents(stockAnalysisDir, [vetoEvent, ...existingEvents])
+      throw new Error(`系统风控已暂停交易：${runtimeStatus.riskControl.pauseReason ?? '未知原因'}`)
+    }
 
     // BUG-1 fix: 当前端未传 price 时，主动获取实时行情作为卖出价
     let price = request.price
@@ -5825,6 +5885,11 @@ export async function closeStockAnalysisPosition(stockAnalysisDir: string, posit
       await saveStockAnalysisRiskEvents(stockAnalysisDir, [...riskResult.newEvents, ...existingEvents])
     }
 
+    // v1.35.0 [A4-P0-2] 记录 nonce 成功执行
+    if (request.clientNonce) {
+      reduceIdempotencyCache.set(request.clientNonce, { ts: Date.now(), positionId })
+    }
+
     // Phase 6: 更新专家个体表现追踪（异步但不阻塞平仓结果）
     updateExpertPerformance(stockAnalysisDir, position, pnlPercent).catch((error) => {
       logger.error(`[stock-analysis] updateExpertPerformance 失败: ${error instanceof Error ? error.message : '未知错误'}`, { module: 'StockAnalysis' })
@@ -5838,9 +5903,11 @@ export async function closeStockAnalysisPosition(stockAnalysisDir: string, posit
 /** 减仓操作 — 卖出部分数量，保留剩余持仓 */
 export async function reduceStockAnalysisPosition(stockAnalysisDir: string, positionId: string, request: StockAnalysisTradeRequest) {
   // Fix 2: 减仓必须在交易时间内
-  const tradingCheck = checkTradingAvailability()
-  if (!tradingCheck.canTrade) {
-    throw new Error(`当前不可交易：${tradingCheck.reason}`)
+  if (!isTradingHoursBypassedForTests()) {
+    const tradingCheck = checkTradingAvailability()
+    if (!tradingCheck.canTrade) {
+      throw new Error(`当前不可交易：${tradingCheck.reason}`)
+    }
   }
 
   // P0-3: 交易操作加互斥锁
@@ -5850,8 +5917,34 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
     if (!position) return null
     assertPositionCanSellToday(position)
 
+    // v1.35.0 [A4-P0-2] 幂等性保护：同一仓位 2 秒内重复减仓直接拒绝
+    if (position.lastTradeAt) {
+      const elapsed = Date.now() - new Date(position.lastTradeAt).getTime()
+      if (elapsed < 2000) {
+        throw new Error(`减仓操作过于频繁（${elapsed}ms 内），请稍后再试以避免重复扣减`)
+      }
+    }
+
+    // v1.35.0 [A4-P0-2] clientNonce 幂等：相同 nonce 60 秒内视为重复
+    if (request.clientNonce) {
+      const seen = reduceIdempotencyCache.get(request.clientNonce)
+      if (seen && Date.now() - seen.ts < 60_000) {
+        throw new Error(`减仓请求重复提交（clientNonce=${request.clientNonce.slice(0, 8)}...），已拒绝`)
+      }
+      // 清理过期缓存
+      if (reduceIdempotencyCache.size > 200) {
+        const now = Date.now()
+        for (const [key, value] of reduceIdempotencyCache) {
+          if (now - value.ts > 60_000) reduceIdempotencyCache.delete(key)
+        }
+      }
+    }
+
     // v1.34.0: 改为按 weight 比例减仓（百分比仓位模型）
     const weightDelta = typeof request.weightDelta === 'number' ? request.weightDelta : 0
+    if (!Number.isFinite(weightDelta)) {
+      throw new Error(`减仓失败：weightDelta 非法（NaN/Infinity）`)
+    }
     if (!(weightDelta > 0)) {
       throw new Error(`减仓失败：weightDelta 必须为正数（当前=${weightDelta}）`)
     }
@@ -5863,6 +5956,21 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
       readStockAnalysisTrades(stockAnalysisDir),
       readStockAnalysisRuntimeStatus(stockAnalysisDir),
     ])
+
+    // v1.35.0 [A4-P0-1] 风控暂停校验：paused=true 时禁止减仓
+    if (runtimeStatus.riskControl?.paused) {
+      const vetoEvent: StockAnalysisRiskEvent = {
+        id: `risk-veto_paused-reduce-${Date.now()}`,
+        timestamp: nowIso(),
+        eventType: 'veto_paused',
+        reason: `系统风控已暂停交易，禁止减仓 ${position.name}(${position.code})：${runtimeStatus.riskControl.pauseReason ?? '未知原因'}`,
+        metrics: {},
+        relatedCode: position.code,
+      }
+      const existingEvents = await readStockAnalysisRiskEvents(stockAnalysisDir)
+      await saveStockAnalysisRiskEvents(stockAnalysisDir, [vetoEvent, ...existingEvents])
+      throw new Error(`系统风控已暂停交易：${runtimeStatus.riskControl.pauseReason ?? '未知原因'}`)
+    }
 
     // 获取实时价格
     let price = request.price
@@ -5912,6 +6020,7 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
       returnPercent: pnlPercent,
       action: 'reduce',
       actionReason: `减仓 ${(weightDelta * 100).toFixed(2)}% 仓位 @ ${price.toFixed(2)}`,
+      lastTradeAt: nowIso(), // v1.35.0 [A4-P0-2] 幂等窗口标记
     }
 
     const updatedPositions = positions.map((item) => item.id === positionId ? updatedPosition : item)
@@ -5924,6 +6033,11 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
     await saveStockAnalysisTrades(stockAnalysisDir, updatedTrades)
     await saveStockAnalysisPositions(stockAnalysisDir, updatedPositions)
     await saveStockAnalysisRuntimeStatus(stockAnalysisDir, { ...runtimeStatus, riskControl: riskResult.state })
+
+    // v1.35.0 [A4-P0-2] 记录 nonce 成功执行
+    if (request.clientNonce) {
+      reduceIdempotencyCache.set(request.clientNonce, { ts: Date.now(), positionId })
+    }
 
     if (riskResult.newEvents.length > 0) {
       const existingEvents = await readStockAnalysisRiskEvents(stockAnalysisDir)
@@ -5941,28 +6055,37 @@ export async function reduceStockAnalysisPosition(stockAnalysisDir: string, posi
  * 不需要交易时间限制 —— 忽略操作不涉及实际交易。
  */
 export async function dismissPositionAction(stockAnalysisDir: string, positionId: string, note?: string): Promise<StockAnalysisPosition | null> {
-  const positions = await readStockAnalysisPositions(stockAnalysisDir)
-  const position = positions.find((item) => item.id === positionId)
-  if (!position) return null
+  // v1.35.0 [A2-P0-3] dismissPositionAction 绕过 TRADING_LOCK_KEY → 整体包进锁内
+  return withFileLock(TRADING_LOCK_KEY, async () => {
+    const positions = await readStockAnalysisPositions(stockAnalysisDir)
+    const position = positions.find((item) => item.id === positionId)
+    if (!position) return null
 
-  if (position.action === 'hold') {
-    // 已经是 hold 状态，无需忽略
-    return position
-  }
+    if (position.action === 'hold') {
+      // 已经是 hold 状态，无需忽略
+      return position
+    }
 
-  const previousAction = position.action
-  const previousReason = position.actionReason
-  const updatedPosition: StockAnalysisPosition = {
-    ...position,
-    action: 'hold',
-    actionReason: `用户忽略了${previousAction === 'stop_loss' ? '止损' : previousAction === 'take_profit' ? '止盈' : previousAction === 'reduce' ? '减仓' : '评估'}提醒`,
-    dismissedAction: previousAction,
-  }
+    // v1.35.0 [A4-P0-1] 风控暂停时，直接拒绝 dismiss（清空告警无商业意义）
+    const runtimeStatus = await readStockAnalysisRuntimeStatus(stockAnalysisDir)
+    if (runtimeStatus.riskControl?.paused) {
+      throw new Error(`系统风控已暂停交易，请先解除风控暂停再处理此告警：${runtimeStatus.riskControl.pauseReason ?? '未知原因'}`)
+    }
 
-  const updatedPositions = positions.map((item) => item.id === positionId ? updatedPosition : item)
-  await saveStockAnalysisPositions(stockAnalysisDir, updatedPositions)
-  saLog.audit('Service', `position action dismissed: ${position.code} ${previousAction}(${previousReason}) → hold | note=${note?.trim() || '无'}`)
-  return updatedPosition
+    const previousAction = position.action
+    const previousReason = position.actionReason
+    const updatedPosition: StockAnalysisPosition = {
+      ...position,
+      action: 'hold',
+      actionReason: `用户忽略了${previousAction === 'stop_loss' ? '止损' : previousAction === 'take_profit' ? '止盈' : previousAction === 'reduce' ? '减仓' : '评估'}提醒`,
+      dismissedAction: previousAction,
+    }
+
+    const updatedPositions = positions.map((item) => item.id === positionId ? updatedPosition : item)
+    await saveStockAnalysisPositions(stockAnalysisDir, updatedPositions)
+    saLog.audit('Service', `position action dismissed: ${position.code} ${previousAction}(${previousReason}) → hold | note=${note?.trim() || '无'}`)
+    return updatedPosition
+  })
 }
 
 export async function refreshStockAnalysisStockPool(stockAnalysisDir: string) {
