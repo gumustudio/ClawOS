@@ -930,6 +930,7 @@ export interface SocialSentimentSnapshot {
   collectedAt: string
   platform: 'xueqiu' | 'guba' | 'weibo' | 'eastmoney_hot'
   sourceKind: 'primary_sentiment' | 'supplementary_heat'
+  contributesToMarketSentiment?: boolean
   summary: string
   hotTopics: string[]
   overallBullBearRatio: { bull: number; bear: number; neutral: number }

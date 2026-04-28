@@ -50,6 +50,13 @@
 
 ## Session Log
 
+### 2026-04-29 v1.35.13 AI 炒股弱牛市与追高风控修复
+- **背景**：复盘 2026-04-28 推荐后发现 Top 信号在 `risingRatio=0.374`、情绪偏悲观时仍按 `bull_trend` 宽松逻辑推荐，且亨通光电等高位动量股被技术/量化推成买入。
+- **数据源修复**：东方财富热股/人气榜改为中性热度源，不再参与社交多空情绪；市场状态改用多源情绪，避免热度榜把行情误判为“乐观牛市”。
+- **策略修复**：弱广度或悲观的 `bull_trend` 改按普通震荡体制收紧；专家流学习后最低权重提升到 32%；`consensus < 0.42` 才强制降级，避免过度否决普通低共识；新增 RSI、高位、20日大涨的追高扣分和强制 watch。
+- **阈值修复**：Conviction 自动调整需要至少 20 笔已平仓样本，并按体制设置安全地板；真实配置 `/home/chriswong/文档/AI炒股分析/config/strategy.json` 已把 `bull_trend.minCompositeScore` 从 60 恢复为 70。
+- **验证**：补充 social sentiment、market state、scoring upgrade 回归，覆盖热度源中性化、多源情绪降级、专家权重下限、追高降级、弱牛市门槛与自动阈值样本下限。
+
 ### 2026-04-26 v1.35.12 AI 炒股模型组胜率链路修复
 - **背景**：用户要求严格修复“记忆复盘 -> 模型组表现”中 `kimi-for-coding (Kimi)`、`glm-5.1 (OpenCodeGo)` 等模型有预测次数但胜率显示 0% 的问题，不能只改前端展示。
 - **根因**：旧链路把 `predictionCount` 从历史 `signals/*.json` 聚合，但 `winRate/weight` 依赖 `expert-performance.json`；同时 `extractMemoryEntriesFromSignals()` 跳过 `rule-engine` 和 `usedFallback`，且 `expert-performance.recentOutcomes` 最多 50 条，模型切换后旧模型 outcome 会被截断。

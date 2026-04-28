@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import type {
   StockAnalysisKlinePoint,
@@ -7,9 +10,11 @@ import type {
   StockAnalysisWatchlistCandidate,
   StockAnalysisStrategyConfig,
   StockAnalysisMarketState,
+  StockAnalysisStockSnapshot,
+  StockAnalysisTradeRecord,
 } from '../src/services/stock-analysis/types'
 import { _testing } from '../src/services/stock-analysis/service'
-import { DEFAULT_STOCK_ANALYSIS_CONFIG } from '../src/services/stock-analysis/store'
+import { DEFAULT_STOCK_ANALYSIS_CONFIG, saveStockAnalysisTrades } from '../src/services/stock-analysis/store'
 
 const {
   buildIndustryStrengthMap,
@@ -20,6 +25,9 @@ const {
   buildTechnicalScore,
   buildQuantScore,
   buildCandidatePoolScore,
+  buildSignal,
+  getAdjustedFusionWeights,
+  adjustConvictionThresholds,
   calculateRsi,
   calculateMacd,
   calculateAtr,
@@ -46,6 +54,192 @@ function createHistory(closes: number[], volumes?: number[]): StockAnalysisKline
       turnoverRate: 3 + (index % 4),
     }
   })
+}
+
+async function createTempStockAnalysisDir(): Promise<string> {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'clawos-scoring-'))
+  const dir = path.join(tempRoot, 'AI炒股分析')
+  await fs.mkdir(dir, { recursive: true })
+  return dir
+}
+
+function createTrade(index: number, pnlPercent: number): StockAnalysisTradeRecord {
+  return {
+    id: `trade-${index}`,
+    action: 'sell',
+    code: '600519',
+    name: '贵州茅台',
+    tradeDate: `2026-04-${String(Math.max(1, 28 - index)).padStart(2, '0')}`,
+    price: 100,
+    quantity: 1,
+    weight: 0.1,
+    sourceSignalId: null,
+    sourceDecision: 'system',
+    note: 'test',
+    relatedPositionId: null,
+    pnlPercent,
+  }
+}
+
+test('getAdjustedFusionWeights keeps expert stream meaningfully represented', () => {
+  const adjusted = getAdjustedFusionWeights(
+    { expert: 0.35, technical: 0.35, quant: 0.30 },
+    {
+      updatedAt: '2026-04-28T00:00:00.000Z',
+      sampleCount: 10,
+      dimensionAccuracy: { expert: 0.3, technical: 0.6, quant: 0.7 },
+      adjustmentFactors: { expert: -0.2, technical: 0.05, quant: 0.15 },
+      history: [],
+    },
+  )
+
+  assert.ok(adjusted.expert >= 0.32)
+})
+
+test('buildSignal penalizes overheated momentum names and downgrades multi-factor chase risk', async () => {
+  const hotSnapshot: StockAnalysisStockSnapshot = {
+    code: '600487',
+    name: '亨通光电',
+    market: 'sh' as const,
+    exchange: 'SSE',
+    sector: '通信',
+    latestPrice: 71.38,
+    changePercent: 2.65,
+    open: 69.54,
+    high: 74.49,
+    low: 68.9,
+    previousClose: 69.54,
+    turnoverRate: 10.2,
+    totalMarketCap: 1760,
+    circulatingMarketCap: 1745,
+    averageTurnoverAmount20d: 10_000_000_000,
+    amplitude20d: 7.39,
+    declineDays20d: 0,
+    return5d: 24.96,
+    return20d: 45.24,
+    return60d: 148.62,
+    return120d: 217.68,
+    momentumRank20d: 0.98,
+    momentumRank60d: 1,
+    volumeBreakout: 1.225,
+    volatility20d: 73.6,
+    volatilityRank: 0.0072,
+    pricePosition20d: 1,
+    movingAverage5: 65.11,
+    movingAverage20: 57.21,
+    movingAverage60: 46.9,
+    movingAverage120: 34.66,
+    movingAverage20Slope: 9.65,
+    movingAverage60Slope: 7.32,
+    rsi14: 74.46,
+    macdLine: 4.87,
+    macdSignal: 3.69,
+    macdHistogram: 1.18,
+    atr14: 3.87,
+    atrPercent: 5.57,
+    distanceToResistance1: 2.53,
+    distanceToSupport1: 6.37,
+    industryStrength: 0.8,
+    industryBreadth: 0.7,
+    industryReturn20d: 30,
+    industryReturn60d: 60,
+    industryTrendStrength: 0.9,
+    scoreReason: [],
+  }
+  const signal = await buildSignal(hotSnapshot, createMarketState({ trend: 'range_bound', sentiment: 'pessimistic', risingRatio: 0.37 }), DEFAULT_STOCK_ANALYSIS_CONFIG, null, null, null, undefined, undefined, undefined, undefined, undefined, null)
+
+  assert.equal(signal.action, 'watch')
+  assert.ok(signal.watchReasons.some((reason) => reason.includes('追高风险')))
+})
+
+test('buildSignal downgrades only extremely low expert consensus instead of every below-threshold consensus', async () => {
+  const snapshot = createSyntheticSnapshot({ return20d: 18, pricePosition20d: 0.82, rsi14: 62 })
+  const normalLowConsensusSignal = await buildSignal(snapshot, createMarketState(), DEFAULT_STOCK_ANALYSIS_CONFIG, null, null, null, undefined, undefined, undefined, undefined, undefined, null)
+  assert.notEqual(normalLowConsensusSignal.action, 'none')
+
+  const extremeLowSnapshot = createSyntheticSnapshot({ return20d: -30, return60d: -40, momentumRank20d: 0.05, momentumRank60d: 0.05, pricePosition20d: 0.2, rsi14: 32 })
+  const extremeLowSignal = await buildSignal(extremeLowSnapshot, createMarketState(), DEFAULT_STOCK_ANALYSIS_CONFIG, null, null, null, undefined, undefined, undefined, undefined, undefined, null)
+  assert.equal(extremeLowSignal.action, 'watch')
+  assert.ok(extremeLowSignal.watchReasons.some((reason) => reason.includes('极低')))
+})
+
+test('weak breadth or pessimistic bull trend uses normal-range thresholds', async () => {
+  const snapshot = createSyntheticSnapshot({ return20d: 12, pricePosition20d: 0.75, rsi14: 58 })
+  const signal = await buildSignal(snapshot, createMarketState({ trend: 'bull_trend', sentiment: 'pessimistic', risingRatio: 0.37 }), DEFAULT_STOCK_ANALYSIS_CONFIG, null, null, null, undefined, undefined, undefined, undefined, undefined, null)
+
+  assert.equal(signal.thresholds.minCompositeScore, DEFAULT_STOCK_ANALYSIS_CONFIG.marketThresholds.normal_range.minCompositeScore)
+  assert.ok(signal.watchReasons.some((reason) => reason.includes('上涨广度/情绪走弱')))
+})
+
+test('adjustConvictionThresholds skips small samples and restores bull floor before loosening', async () => {
+  const smallSampleDir = await createTempStockAnalysisDir()
+  await saveStockAnalysisTrades(smallSampleDir, Array.from({ length: 10 }, (_, index) => createTrade(index, 5)))
+  const smallSampleConfig: StockAnalysisStrategyConfig = structuredClone(DEFAULT_STOCK_ANALYSIS_CONFIG)
+  smallSampleConfig.marketThresholds.bull_trend.minCompositeScore = 60
+  const skipped = await adjustConvictionThresholds(smallSampleDir, smallSampleConfig, createMarketState({ trend: 'bull_trend' }))
+  assert.equal(skipped, null)
+  assert.equal(smallSampleConfig.marketThresholds.bull_trend.minCompositeScore, 60)
+
+  const fullSampleDir = await createTempStockAnalysisDir()
+  await saveStockAnalysisTrades(fullSampleDir, Array.from({ length: 25 }, (_, index) => createTrade(index, 5)))
+  const config: StockAnalysisStrategyConfig = structuredClone(DEFAULT_STOCK_ANALYSIS_CONFIG)
+  config.marketThresholds.bull_trend.minCompositeScore = 60
+  const adjusted = await adjustConvictionThresholds(fullSampleDir, config, createMarketState({ trend: 'bull_trend' }))
+  assert.equal(adjusted?.newMinCompositeScore, 70)
+  assert.equal(config.marketThresholds.bull_trend.minCompositeScore, 70)
+})
+
+function createSyntheticSnapshot(overrides: Partial<StockAnalysisStockSnapshot> = {}): StockAnalysisStockSnapshot {
+  return {
+    code: '600519',
+    name: '贵州茅台',
+    market: 'sh',
+    exchange: 'SSE',
+    sector: '酿酒行业',
+    latestPrice: 100,
+    changePercent: 1,
+    open: 99,
+    high: 102,
+    low: 98,
+    previousClose: 99,
+    turnoverRate: 5,
+    totalMarketCap: 1_500_000_000_000,
+    circulatingMarketCap: 1_500_000_000_000,
+    averageTurnoverAmount20d: 1_000_000_000,
+    amplitude20d: 12,
+    declineDays20d: 2,
+    return5d: 4,
+    return20d: 16,
+    return60d: 35,
+    return120d: 50,
+    momentumRank20d: 0.8,
+    momentumRank60d: 0.82,
+    volumeBreakout: 1.1,
+    volatility20d: 25,
+    volatilityRank: 0.4,
+    pricePosition20d: 0.75,
+    movingAverage5: 100,
+    movingAverage20: 94,
+    movingAverage60: 88,
+    movingAverage120: 80,
+    movingAverage20Slope: 1.5,
+    movingAverage60Slope: 1,
+    rsi14: 58,
+    macdLine: 1.2,
+    macdSignal: 0.9,
+    macdHistogram: 0.3,
+    atr14: 2,
+    atrPercent: 2,
+    distanceToResistance1: 8,
+    distanceToSupport1: 6,
+    industryStrength: 0.7,
+    industryBreadth: 0.65,
+    industryReturn20d: 15,
+    industryReturn60d: 25,
+    industryTrendStrength: 0.7,
+    scoreReason: [],
+    ...overrides,
+  }
 }
 
 function createCandidate(): StockAnalysisWatchlistCandidate {

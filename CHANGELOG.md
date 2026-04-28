@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.35.13] - 2026-04-29 — AI 炒股弱牛市与追高风控修复
+### 修复
+- **[市场状态] 热股榜不再冒充社交情绪**：东方财富热股/人气榜改为中性热度源，不再参与多空情绪聚合；市场状态现在使用多源情绪，避免“100% 看多”的热度榜把弱广度行情误判成乐观牛市。
+- **[策略门槛] 弱广度/悲观情绪下不再按牛市放宽**：当 `bull_trend` 同时出现 `risingRatio < 0.45` 或 `sentiment=pessimistic` 时，策略改用普通震荡体制的阈值和权重，避免纯指数趋势带动过度买入。
+- **[Conviction Filter] 修复 bull_trend 门槛被自动学习压到 60 的问题**：自动阈值调整现在至少需要 20 笔已平仓样本，且按市场体制设置安全地板；真实运行配置已把 `bull_trend.minCompositeScore` 恢复为 `70`。
+- **[三流融合] 提高专家流最低权重**：学习权重调整后专家流最低占比从 `25%` 提升到 `32%`，避免技术/量化在专家明显分歧时单独把信号冲成买入。
+- **[追高风控] 新增过热动量惩罚**：`RSI > 70`、`pricePosition20d > 0.95`、`20日涨幅 > 30%` 会扣分；多项同时触发或 20 日涨幅极端时，买入信号强制降级为 `watch`。
+- **[专家共识] 只对极低共识强制降级**：普通低于门槛的专家共识仍进入综合评分，但 `consensus < 0.42` 会阻止技术/量化单独升级为 `buy/strong_buy`。
+
+### 测试
+- 更新 `backend/tests/socialSentiment.test.ts`、`backend/tests/stockAnalysisService.test.ts`、`backend/tests/stockAnalysisScoringUpgrade.test.ts`，覆盖热度源中性化、多源情绪降级、专家权重下限、追高降级、弱牛市门槛、自动阈值样本下限与 bull floor 恢复。
+
 ## [1.35.12] - 2026-04-26 — AI 炒股模型组胜率链路修复
 ### 修复
 - **[记忆复盘 / 模型组表现] 修复“有预测次数但胜率 0%”的数据链路问题**：`extractMemoryEntriesFromSignals()` 不再跳过规则专家和 fallback 投票，daily-memory 与 expert-performance 现在保留实际 `modelId/providerId/providerName/assignedModelId/usedFallback`，避免 `kimi-for-coding (Kimi)`、`glm-5.1 (OpenCodeGo)` 等模型因为缺专家表现样本而显示 0%。

@@ -1268,6 +1268,46 @@ function buildSentimentSummaryText(
   return `${platformLabel}${stance}，多${Math.round(ratio.bull * 100)}%/空${Math.round(ratio.bear * 100)}%，热点: ${topicText}`
 }
 
+function buildNeutralHeatRatio(): { bull: number; bear: number; neutral: number } {
+  return { bull: 0, bear: 0, neutral: 1 }
+}
+
+export function aggregateSocialSentiment(
+  snapshots: SocialSentimentSnapshot[],
+): { bull: number; bear: number; neutral: number; score: number; sourceCount: number } {
+  const validSnapshots = snapshots.filter((snapshot) => {
+    if (snapshot.contributesToMarketSentiment === false) return false
+    if (snapshot.sourceKind !== 'primary_sentiment' && snapshot.contributesToMarketSentiment !== true) return false
+    const { bull, bear, neutral } = snapshot.overallBullBearRatio
+    return [bull, bear, neutral].every((value) => Number.isFinite(value) && value >= 0)
+      && bull + bear + neutral > 0
+  })
+
+  if (validSnapshots.length === 0) {
+    return { bull: 0.33, bear: 0.33, neutral: 0.34, score: 0, sourceCount: 0 }
+  }
+
+  let bull = 0
+  let bear = 0
+  let neutral = 0
+  let totalWeight = 0
+  for (const snapshot of validSnapshots) {
+    const sourceWeight = snapshot.sourceKind === 'primary_sentiment' ? 1 : 0.5
+    bull += snapshot.overallBullBearRatio.bull * sourceWeight
+    bear += snapshot.overallBullBearRatio.bear * sourceWeight
+    neutral += snapshot.overallBullBearRatio.neutral * sourceWeight
+    totalWeight += sourceWeight
+  }
+
+  return {
+    bull: Math.round((bull / totalWeight) * 100) / 100,
+    bear: Math.round((bear / totalWeight) * 100) / 100,
+    neutral: Math.round((neutral / totalWeight) * 100) / 100,
+    score: Math.round(((bull - bear) / totalWeight) * 10000) / 10000,
+    sourceCount: validSnapshots.length,
+  }
+}
+
 /** 根据标题和正文关键词推断政策分类 */
 function classifyPolicyCategory(title: string, text: string): 'monetary_policy' | 'regulatory' | 'industry' | 'fiscal' | 'other' {
   const combined = `${title} ${text}`.toLowerCase()
@@ -1408,6 +1448,7 @@ except Exception as e:
       collectedAt: nowIso(),
       platform: 'xueqiu',
       sourceKind: 'primary_sentiment',
+      contributesToMarketSentiment: true,
       summary: buildSentimentSummaryText('雪球舆情', xueqiuRatio, xueqiuTopics),
       hotTopics: xueqiuTopics,
       overallBullBearRatio: xueqiuRatio,
@@ -1445,6 +1486,7 @@ except Exception as e:
       collectedAt: nowIso(),
       platform: 'weibo',
       sourceKind: 'primary_sentiment',
+      contributesToMarketSentiment: true,
       summary: buildSentimentSummaryText('微博舆情', weiboRatio, weiboTopics),
       hotTopics: weiboTopics,
       overallBullBearRatio: weiboRatio,
@@ -1477,6 +1519,7 @@ except Exception as e:
       collectedAt: nowIso(),
       platform: 'guba',
       sourceKind: 'supplementary_heat',
+      contributesToMarketSentiment: true,
       summary: buildSentimentSummaryText('同花顺热榜', ratio, hotTopics),
       hotTopics,
       overallBullBearRatio: ratio,
@@ -1504,11 +1547,12 @@ except Exception as e:
     })
     if (emRank && emRank.length > 0) {
       const hotTopics = emRank.slice(0, 10).map((item) => item.sc ?? '')
-      const ratio = computeBullBearRatio([])
+      const ratio = buildNeutralHeatRatio()
       snapshots.push({
         collectedAt: nowIso(),
         platform: 'guba',
         sourceKind: 'supplementary_heat',
+        contributesToMarketSentiment: false,
         summary: buildSentimentSummaryText('东方财富人气榜', ratio, hotTopics),
         hotTopics,
         overallBullBearRatio: ratio,
@@ -1533,20 +1577,20 @@ except Exception as e:
     )
     const list = resp.data?.diff ?? []
     if (list.length > 0) {
-      const changes = list.map((item) => item.f3 ?? 0)
-      const ratio = computeBullBearRatio(changes)
+      const ratio = buildNeutralHeatRatio()
       const hotTopics = list.slice(0, 10).map((item) => item.f14 ?? '')
       snapshots.push({
         collectedAt: nowIso(),
         platform: 'eastmoney_hot',
         sourceKind: 'supplementary_heat',
+        contributesToMarketSentiment: false,
         summary: buildSentimentSummaryText('东方财富热股', ratio, hotTopics),
         hotTopics,
         overallBullBearRatio: ratio,
         topMentionedStocks: list.slice(0, 10).map((item) => ({
           code: normalizeAStockCode(item.f12 ?? ''),
           mentionCount: 1,
-          sentiment: (item.f3 ?? 0) > 0 ? 0.5 : (item.f3 ?? 0) < 0 ? -0.5 : 0,
+          sentiment: 0,
         })).filter((item) => item.code),
       })
     }
@@ -1586,6 +1630,7 @@ except Exception as e:
         collectedAt: nowIso(),
         platform: 'eastmoney_hot',
         sourceKind: 'supplementary_heat',
+        contributesToMarketSentiment: true,
         summary: buildSentimentSummaryText('千股千评', ratio, hotTopics),
         hotTopics,
         overallBullBearRatio: ratio,
@@ -1613,6 +1658,7 @@ except Exception as e:
         collectedAt: nowIso(),
         platform: 'weibo',
         sourceKind: 'supplementary_heat',
+        contributesToMarketSentiment: false,
         summary: buildSentimentSummaryText('微博热搜', ratio, topics),
         hotTopics: topics.slice(0, 10),
         overallBullBearRatio: ratio,
@@ -2050,4 +2096,5 @@ export const _testing = {
   getRecentFactPoolBackup,
   applyFactPoolBackups,
   shouldReportGlobalIndexError,
+  aggregateSocialSentiment,
 }

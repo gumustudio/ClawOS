@@ -80,6 +80,10 @@ export interface StockAnalysisMarketState {
   volatilityPercentile?: number
   /** 成交量在252日历史中的百分位 (0-1)，用于市场级风控 */
   volumePercentile?: number
+  /** 多渠道舆情聚合，多=正，空=负。旧数据可能缺失。 */
+  socialSentimentScore?: number
+  /** 舆情聚合使用的有效来源数。旧数据可能缺失。 */
+  socialSentimentSourceCount?: number
 }
 
 export interface StockAnalysisStockSnapshot {
@@ -1023,6 +1027,8 @@ export interface SocialSentimentSnapshot {
   collectedAt: string
   platform: 'xueqiu' | 'guba' | 'weibo' | 'eastmoney_hot'
   sourceKind: 'primary_sentiment' | 'supplementary_heat'
+  /** 是否可参与市场情绪聚合。热榜/热点源只提供热点，不应当成多空情绪。 */
+  contributesToMarketSentiment?: boolean
   summary: string
   hotTopics: string[]
   overallBullBearRatio: { bull: number; bear: number; neutral: number }

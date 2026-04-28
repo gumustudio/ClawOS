@@ -7,6 +7,9 @@ import childProcess from 'node:child_process'
 import { promisify } from 'node:util'
 
 import type { StockAnalysisAIConfig } from '../src/services/stock-analysis/types'
+import { _testing as serviceTesting } from '../src/services/stock-analysis/service'
+
+const { buildMarketState } = serviceTesting
 
 async function createTempStockAnalysisDir() {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'clawos-stock-analysis-service-'))
@@ -82,6 +85,41 @@ const TEST_AI_CONFIG: StockAnalysisAIConfig = {
     },
   ],
 }
+
+test('buildMarketState uses multi-source social sentiment to avoid false bull trend', () => {
+  const stockPool = [
+    { code: '600001', name: 'A', market: 'sh' as const, exchange: 'SSE' },
+    { code: '600002', name: 'B', market: 'sh' as const, exchange: 'SSE' },
+    { code: '600003', name: 'C', market: 'sh' as const, exchange: 'SSE' },
+    { code: '600004', name: 'D', market: 'sh' as const, exchange: 'SSE' },
+  ]
+  const quotes = new Map(stockPool.map((item, index) => [item.code, {
+    code: item.code,
+    name: item.name,
+    latestPrice: 10,
+    changePercent: index === 0 ? 1 : -1,
+    open: 10,
+    high: 11,
+    low: 9,
+    previousClose: 10,
+    turnoverRate: 1,
+    totalMarketCap: 100,
+    circulatingMarketCap: 90,
+    amount: 100_000_000,
+  }]))
+  const indexHistory = Array.from({ length: 30 }, (_, index) => ({
+    日期: `2026-04-${String(index + 1).padStart(2, '0')}`,
+    收盘: index === 9 ? 100 : index === 29 ? 108 : 100 + index * 0.2,
+    成交额: 100_000_000_000 + index,
+  }))
+
+  const marketState = buildMarketState(stockPool, quotes, indexHistory, { score: -0.3, sourceCount: 3 })
+
+  assert.equal(marketState.trend, 'range_bound')
+  assert.equal(marketState.sentiment, 'pessimistic')
+  assert.equal(marketState.socialSentimentScore, -0.3)
+  assert.equal(marketState.socialSentimentSourceCount, 3)
+})
 
 test('stock analysis daily run uses direct Eastmoney index history before AKShare fallback', async () => {
   const originalFetch = global.fetch

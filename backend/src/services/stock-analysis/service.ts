@@ -7,6 +7,7 @@ import { runExpertVoting } from './llm-inference'
 import type { LLMExpertScore } from './llm-inference'
 import { fetchFundamentalsForCodes } from './fundamentals'
 import { callProviderText } from './llm-provider-adapter'
+import { aggregateSocialSentiment } from './data-agents'
 import { buildExpertProfile, buildFactPoolSummary, runDailyMemoryUpdate, runLongTermMemoryUpdate } from './memory'
 import { checkTradingAvailability, getRecentTradeDates, isWithinTradingHours as isWithinTradingHoursShared } from './trading-calendar'
 import {
@@ -1493,8 +1494,10 @@ function calculateSupportResistance(klines: StockAnalysisKlinePoint[], latestPri
   }
 }
 
-function detectTrend(return20d: number): MarketTrend {
+function detectTrend(return20d: number, sentimentScore: number = 0, sentimentSourceCount: number = 0): MarketTrend {
+  if (return20d > 5 && sentimentSourceCount >= 2 && sentimentScore < -0.2) return 'range_bound'
   if (return20d > 5) return 'bull_trend'
+  if (return20d < -5 && sentimentSourceCount >= 2 && sentimentScore > 0.2) return 'range_bound'
   if (return20d < -5) return 'bear_trend'
   return 'range_bound'
 }
@@ -1523,7 +1526,13 @@ function detectLiquidity(avgTurnover20d: number, percentile?: number): MarketLiq
   return 'normal_liquidity'
 }
 
-function detectSentiment(risingRatio: number): MarketSentiment {
+function detectSentiment(risingRatio: number, socialScore: number = 0, socialSourceCount: number = 0): MarketSentiment {
+  if (socialSourceCount >= 2) {
+    const combinedScore = risingRatio - 0.5 + socialScore * 0.5
+    if (combinedScore > 0.1) return 'optimistic'
+    if (combinedScore < -0.1) return 'pessimistic'
+    return 'neutral'
+  }
   if (risingRatio > 0.6) return 'optimistic'
   if (risingRatio < 0.4) return 'pessimistic'
   return 'neutral'
@@ -1568,7 +1577,20 @@ function isLowLiquidityGuardrail(marketState: StockAnalysisMarketState, config: 
   return volumePct < config.lowLiquidityGuardrail.volumePercentileThreshold && !isLiquidityCrisis(marketState, config)
 }
 
-function buildMarketState(stockPool: StockAnalysisWatchlistCandidate[], quotes: Map<string, StockAnalysisSpotQuote>, indexHistory: PythonIndexHistoryItem[]) {
+async function loadLatestSocialSentiment(stockAnalysisDir: string): Promise<{ score: number; sourceCount: number }> {
+  const dates = await getAvailableDataCollectionDates(stockAnalysisDir)
+  for (const date of dates.slice(0, 5)) {
+    const factPool = await readFactPool(stockAnalysisDir, date)
+    if (!factPool || factPool.socialSentiment.length === 0) continue
+    const aggregated = aggregateSocialSentiment(factPool.socialSentiment)
+    if (aggregated.sourceCount > 0) return { score: aggregated.score, sourceCount: aggregated.sourceCount }
+  }
+  return { score: 0, sourceCount: 0 }
+}
+
+function buildMarketState(stockPool: StockAnalysisWatchlistCandidate[], quotes: Map<string, StockAnalysisSpotQuote>, indexHistory: PythonIndexHistoryItem[], socialSentiment?: { score: number; sourceCount: number }) {
+  const socialScore = socialSentiment?.score ?? 0
+  const socialSourceCount = socialSentiment?.sourceCount ?? 0
   const stockReturns = stockPool
     .map((item) => quotes.get(item.code))
     .filter((item): item is StockAnalysisSpotQuote => Boolean(item))
@@ -1582,12 +1604,14 @@ function buildMarketState(stockPool: StockAnalysisWatchlistCandidate[], quotes: 
       trend: 'range_bound',
       volatility: 'normal_volatility',
       liquidity: 'normal_liquidity',
-      sentiment: detectSentiment(risingRatio),
+      sentiment: detectSentiment(risingRatio, socialScore, socialSourceCount),
       style: detectStyle(avgReturn20d),
       csi500Return20d: 0,
       annualizedVolatility20d: 0,
       averageTurnover20d: 0,
       risingRatio: round(risingRatio, 4),
+      socialSentimentScore: round(socialScore, 4),
+      socialSentimentSourceCount: socialSourceCount,
     } satisfies StockAnalysisMarketState
   }
 
@@ -1619,10 +1643,10 @@ function buildMarketState(stockPool: StockAnalysisWatchlistCandidate[], quotes: 
 
   return {
     asOfDate: todayDate(),
-    trend: detectTrend(csi500Return20d),
+    trend: detectTrend(csi500Return20d, socialScore, socialSourceCount),
     volatility: detectVolatility(annualizedVolatility20d, volatilityPercentile),
     liquidity: detectLiquidity(averageTurnover20d, volumePercentile),
-    sentiment: detectSentiment(risingRatio),
+    sentiment: detectSentiment(risingRatio, socialScore, socialSourceCount),
     style: detectStyle(avgReturn20d),
     csi500Return20d: round(csi500Return20d),
     annualizedVolatility20d: round(annualizedVolatility20d),
@@ -1630,6 +1654,8 @@ function buildMarketState(stockPool: StockAnalysisWatchlistCandidate[], quotes: 
     risingRatio: round(risingRatio, 4),
     volatilityPercentile: round(volatilityPercentile, 4),
     volumePercentile: round(volumePercentile, 4),
+    socialSentimentScore: round(socialScore, 4),
+    socialSentimentSourceCount: socialSourceCount,
   } satisfies StockAnalysisMarketState
 }
 
@@ -2145,6 +2171,7 @@ function buildCandidatePoolScore(snapshot: StockAnalysisStockSnapshot) {
 }
 
 function getMarketRegime(marketState: StockAnalysisMarketState): MarketRegime {
+  if (marketState.trend === 'bull_trend' && ((marketState.risingRatio ?? 0.5) < BULL_TREND_WEAK_BREADTH_THRESHOLD || marketState.sentiment === 'pessimistic')) return 'normal_range'
   if (marketState.trend === 'bull_trend') return 'bull_trend'
   if (marketState.trend === 'bear_trend') return 'bear_trend'
   if (marketState.volatility === 'high_volatility') return 'high_volatility'
@@ -2160,6 +2187,24 @@ function getThresholds(config: StockAnalysisStrategyConfig, marketState: StockAn
 function getFusionWeights(config: StockAnalysisStrategyConfig, marketState: StockAnalysisMarketState): StockAnalysisFusionWeights {
   const regime = getMarketRegime(marketState)
   return config.fusionWeightsByRegime[regime]
+}
+
+function calculateChaseRiskPenalty(snapshot: StockAnalysisStockSnapshot): { penalty: number; reasons: string[]; forceWatch: boolean } {
+  const reasons: string[] = []
+  let penalty = 0
+  if ((snapshot.rsi14 ?? 0) > 70) {
+    penalty += 4
+    reasons.push(`RSI ${round(snapshot.rsi14 ?? 0)} > 70`)
+  }
+  if (snapshot.pricePosition20d > 0.95) {
+    penalty += 4
+    reasons.push(`20日位置 ${round(snapshot.pricePosition20d, 2)} > 0.95`)
+  }
+  if (snapshot.return20d > 30) {
+    penalty += 5
+    reasons.push(`20日涨幅 ${round(snapshot.return20d)}% > 30%`)
+  }
+  return { penalty, reasons, forceWatch: reasons.length >= 2 || snapshot.return20d > 45 }
 }
 
 /**
@@ -2289,11 +2334,16 @@ async function buildSignal(snapshot: StockAnalysisStockSnapshot, marketState: St
     saLog.info('Service', `低流动性护栏 ${snapshot.code}(${snapshot.name}): ${liquidityExplanation} scorePenalty=${config.lowLiquidityGuardrail.scorePenalty}`)
   }
   if (marketState.volatility === 'high_volatility' && marketState.annualizedVolatility20d > 35 && (marketState.volatilityPercentile ?? 0) <= 0.95) vetoReasons.push('市场波动率偏高')
+  if (marketState.trend === 'bull_trend' && ((marketState.risingRatio ?? 0.5) < BULL_TREND_WEAK_BREADTH_THRESHOLD || marketState.sentiment === 'pessimistic')) {
+    watchReasons.push('牛市趋势但上涨广度/情绪走弱，按普通震荡体制收紧')
+  }
   // [MH1] 重大事件一票否决：即将/正在发生财报、解禁、重组等重大事件的股票
   const eventVetoReason = eventVetoCodes?.get(snapshot.code)
   if (eventVetoReason) vetoReasons.push(eventVetoReason)
   if (expert.consensus >= thresholds.minExpertConsensus) passingChecks.push('专家共识达标')
   else watchReasons.push(`专家共识 ${expert.consensus} 低于门槛 ${thresholds.minExpertConsensus}`)
+  const extremeLowExpertConsensus = expert.consensus < EXTREME_LOW_EXPERT_CONSENSUS
+  if (extremeLowExpertConsensus) watchReasons.push(`专家共识 ${expert.consensus} 极低，禁止按技术/量化单独升级为买入`)
   if (technical.total >= thresholds.minTechnicalScore) passingChecks.push('技术分达标')
   else watchReasons.push(`技术分 ${technical.total} 低于门槛 ${thresholds.minTechnicalScore}`)
   if (quant.total >= thresholds.minQuantScore) passingChecks.push('量化分达标')
@@ -2304,6 +2354,11 @@ async function buildSignal(snapshot: StockAnalysisStockSnapshot, marketState: St
   const sameDirectionBonus = snapshot.return20d > 0 && technical.total > 70 && quant.total > 65 ? 5 : 0
   compositeScore += sameDirectionBonus
   if (sameDirectionBonus > 0) passingChecks.push('三流方向一致加分')
+  const chaseRisk = calculateChaseRiskPenalty(snapshot)
+  if (chaseRisk.penalty > 0) {
+    compositeScore = Math.max(0, compositeScore - chaseRisk.penalty)
+    watchReasons.push(`追高风险扣 ${chaseRisk.penalty} 分：${chaseRisk.reasons.join('；')}`)
+  }
   if (expert.consensus > 0.75) passingChecks.push('专家共识高于 0.75')
   if (snapshot.volumeBreakout > 1.2) passingChecks.push('放量突破')
   if (snapshot.pricePosition20d > 0.8) passingChecks.push('接近20日强势区间上沿')
@@ -2323,6 +2378,10 @@ async function buildSignal(snapshot: StockAnalysisStockSnapshot, marketState: St
   else if (finalScore >= 80) action = 'strong_buy'
   else if (finalScore >= thresholds.minCompositeScore) action = 'buy'
   else if (finalScore >= 65) action = 'watch'
+
+  if ((extremeLowExpertConsensus || chaseRisk.forceWatch) && (action === 'strong_buy' || action === 'buy')) {
+    action = 'watch'
+  }
 
   // Override 正反馈：当用户历史 override 表现出色时，自动放宽接近门槛的 watch 信号
   // 条件：1) 当前判定为 watch  2) 非一票否决  3) 分数差距 < 5 分  4) override 胜率 > 60% 且样本 >= 3
@@ -2861,8 +2920,10 @@ const WEIGHT_DECAY_HALF_LIFE_DAYS = 30
 const MAX_WEIGHT_ADJUSTMENT = 0.2
 const MIN_REVIEWS_FOR_LEARNING = 5
 const MAX_WEIGHT_HISTORY = 50
-const MIN_EXPERT_FUSION_WEIGHT = 0.25
+const MIN_EXPERT_FUSION_WEIGHT = 0.32
 const MAX_EXPERT_FUSION_WEIGHT = 0.45
+const EXTREME_LOW_EXPERT_CONSENSUS = 0.42
+const BULL_TREND_WEAK_BREADTH_THRESHOLD = 0.45
 
 async function computeLearnedWeights(stockAnalysisDir: string): Promise<StockAnalysisLearnedWeights | null> {
   const reviews = await readStockAnalysisReviews(stockAnalysisDir)
@@ -2975,18 +3036,25 @@ function getAdjustedFusionWeights(
 }
 
 /** Phase 4.2: 基于胜率自动调整 Conviction Filter 阈值 */
-const CONVICTION_SAMPLE_SIZE = 20
+const CONVICTION_SAMPLE_SIZE = 30
+const MIN_CONVICTION_SAMPLE_SIZE = 20
 const CONVICTION_BOOST = -2
 const CONVICTION_TIGHTEN = 3
-const MIN_COMPOSITE_SCORE_FLOOR = 60
+const MIN_COMPOSITE_SCORE_FLOOR_BY_REGIME: Record<MarketRegime, number> = {
+  bull_trend: 70,
+  bear_trend: 78,
+  high_volatility: 76,
+  low_volatility_range: 73,
+  normal_range: 66,
+}
 const MAX_COMPOSITE_SCORE_CEIL = 85
 
 async function adjustConvictionThresholds(stockAnalysisDir: string, config: StockAnalysisStrategyConfig, marketState: StockAnalysisMarketState): Promise<StockAnalysisThresholdAdjustment | null> {
   const trades = await readStockAnalysisTrades(stockAnalysisDir)
   const recentTrades = trades.filter((t) => t.action === 'sell' && t.pnlPercent != null).slice(0, CONVICTION_SAMPLE_SIZE)
 
-  if (recentTrades.length < 10) {
-    logger.debug(`[stock-analysis] 交易记录不足 10 条（当前 ${recentTrades.length}），跳过阈值调整`)
+  if (recentTrades.length < MIN_CONVICTION_SAMPLE_SIZE) {
+    logger.debug(`[stock-analysis] 交易记录不足 ${MIN_CONVICTION_SAMPLE_SIZE} 条（当前 ${recentTrades.length}），跳过阈值调整`)
     return null
   }
 
@@ -2998,7 +3066,14 @@ async function adjustConvictionThresholds(stockAnalysisDir: string, config: Stoc
 
   let adjustment = 0
   let reason = ''
-  if (winRate > 0.6) {
+  const isWeakBullTrend = regime === 'bull_trend'
+    && ((marketState.risingRatio ?? 0.5) < BULL_TREND_WEAK_BREADTH_THRESHOLD || marketState.sentiment === 'pessimistic')
+  const floor = MIN_COMPOSITE_SCORE_FLOOR_BY_REGIME[regime] ?? 70
+
+  if (prevScore < floor) {
+    adjustment = floor - prevScore
+    reason = `当前门槛 ${prevScore} 低于 ${regime} 安全地板 ${floor}，恢复最低门槛`
+  } else if (winRate > 0.6 && !isWeakBullTrend) {
     adjustment = CONVICTION_BOOST
     reason = `胜率 ${(winRate * 100).toFixed(0)}% > 60%，适度放宽门槛以捕捉更多机会`
   } else if (winRate < 0.4) {
@@ -3009,7 +3084,7 @@ async function adjustConvictionThresholds(stockAnalysisDir: string, config: Stoc
     return null
   }
 
-  const newScore = Math.max(MIN_COMPOSITE_SCORE_FLOOR, Math.min(MAX_COMPOSITE_SCORE_CEIL, prevScore + adjustment))
+  const newScore = Math.max(floor, Math.min(MAX_COMPOSITE_SCORE_CEIL, prevScore + adjustment))
   if (newScore === prevScore) {
     logger.debug(`[stock-analysis] 阈值已到边界 ${prevScore}，无法继续调整`)
     return null
@@ -4091,7 +4166,8 @@ export async function runStockAnalysisDaily(stockAnalysisDir: string): Promise<S
         quoteCacheAt: quoteEnvelope.fetchedAt,
       })
       const indexHistoryEnvelope = await getIndexHistoryData(stockAnalysisDir)
-      const marketState = buildMarketState(stockPool, quotes, indexHistoryEnvelope.data)
+      const socialSentiment = await loadLatestSocialSentiment(stockAnalysisDir)
+      const marketState = buildMarketState(stockPool, quotes, indexHistoryEnvelope.data, socialSentiment)
 
       const [currentPositions, blacklist] = await Promise.all([
         readStockAnalysisPositions(stockAnalysisDir),
@@ -4566,7 +4642,8 @@ export async function runStockAnalysisPostMarket(
       const quoteEnvelope = await getQuoteData(stockAnalysisDir, stockPool.map((item) => item.code))
       const quotes = quoteEnvelope.data
       const indexHistoryEnvelope = await getIndexHistoryData(stockAnalysisDir)
-      const marketState = buildMarketState(stockPool, quotes, indexHistoryEnvelope.data)
+      const socialSentiment = await loadLatestSocialSentiment(stockAnalysisDir)
+      const marketState = buildMarketState(stockPool, quotes, indexHistoryEnvelope.data, socialSentiment)
       saLog.info('Service', `[盘后] 市场流动性状态: ${describeMarketLiquidityState(marketState, config)}`)
 
       // Phase 2: 持仓评估（止损止盈检查 + 信号衰减检测）
@@ -4682,6 +4759,11 @@ export async function runStockAnalysisPostMarket(
       try {
         const memoryAiConfig = await readStockAnalysisAIConfig(stockAnalysisDir)
         await runDailyMemoryUpdate(stockAnalysisDir, tradeDate, memoryAiConfig)
+        const refreshedExpertPerformance = await readStockAnalysisExpertPerformance(stockAnalysisDir)
+        const refreshedModelGroups = hasModelGroupPerformanceSamples(refreshedExpertPerformance)
+          ? await buildModelGroupPerformance(stockAnalysisDir, refreshedExpertPerformance)
+          : []
+        await saveStockAnalysisModelGroups(stockAnalysisDir, refreshedModelGroups)
         logger.info(`[stock-analysis] [盘后] 专家记忆更新完成: ${tradeDate}`, { module: 'StockAnalysis' })
       } catch (error) {
         logger.error(`[stock-analysis] [盘后] 专家记忆更新失败（不影响盘后结果）: ${(error as Error).message}`)
@@ -7043,6 +7125,9 @@ export const _testing = {
   buildTechnicalScore,
   buildQuantScore,
   buildCandidatePoolScore,
+  buildMarketState,
+  detectSentiment,
+  detectTrend,
   calculateRsi,
   calculateMacd,
   calculateAtr,
