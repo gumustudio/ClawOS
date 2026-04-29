@@ -32,18 +32,14 @@ export function deleteReaderFeed(feedId: string) {
 }
 
 export function syncReaderNow() {
-  return requestJson<{ processedInboxCount: number; importedArticleCount: number }>(`/api/system/reader/sync`, { method: 'POST' })
+  return requestJson<{ importedArticleCount: number }>(`/api/system/reader/sync`, { method: 'POST' })
 }
 
 export function pullReaderSubscriptions() {
-  return requestJson<{ processedInboxCount: number; importedArticleCount: number }>(`/api/system/reader/pull`, { method: 'POST' })
+  return requestJson<{ importedArticleCount: number }>(`/api/system/reader/pull`, { method: 'POST' })
 }
 
-export function refreshReaderLocalInbox() {
-  return requestJson<{ processedInboxCount: number; importedArticleCount: number }>(`/api/system/reader/refresh`, { method: 'POST' })
-}
-
-export function fetchReaderArticles(params: { category?: string; date?: string; source?: 'rss' | 'openclaw'; saved?: boolean; unread?: boolean; limit?: number; offset?: number }) {
+export function fetchReaderArticles(params: { category?: string; date?: string; source?: 'rss'; saved?: boolean; unread?: boolean; limit?: number; offset?: number }) {
   const search = new URLSearchParams()
   if (params.category) search.set('category', params.category)
   if (params.date) search.set('date', params.date)

@@ -10,18 +10,13 @@ import type {
   ReaderSyncResult,
 } from './types';
 import { buildDailyBrief } from './brief';
-import { normalizeInboxPayload, normalizeRssArticle } from './normalize';
+import { normalizeRssArticle } from './normalize';
 import {
   clearReaderRuntimeData,
   deleteReadLater,
   ensureReaderStructure,
-  moveInboxFile,
   readAllArticles,
-  readDailyBrief,
   readFeeds,
-  readInboxBucketStatus,
-  readInboxPayload,
-  readPendingInboxFiles,
   readReadLater,
   readSyncStatus,
   saveArticle,
@@ -56,7 +51,7 @@ function defaultSummary(article: ReaderArticle) {
   return article.aiSummary && article.aiSummary.length > 0 ? article.aiSummary : article.summary;
 }
 
-async function summarizeArticleWithOpenClaw(article: ReaderArticle) {
+async function summarizeArticleWithAi(article: ReaderArticle) {
   const sourceText = article.contentText || article.summary.join('\n');
   if (!sourceText.trim()) {
     return null;
@@ -87,7 +82,7 @@ async function summarizeArticleWithOpenClaw(article: ReaderArticle) {
 }
 
 function mergeArticles(existing: ReaderArticle[], incoming: ReaderArticle[]): ReaderArticle[] {
-  const map = new Map(existing.map((article) => [article.dedupeKey, article]));
+  const map = new Map(existing.filter((article) => article.sourceType === 'rss').map((article) => [article.dedupeKey, article]));
   for (const article of incoming) {
     const current = map.get(article.dedupeKey);
     if (current) {
@@ -134,7 +129,6 @@ async function finalizeReaderSync(
   status: Awaited<ReturnType<typeof markReaderSyncStarted>>,
   currentArticles: ReaderArticle[],
   mergedArticles: ReaderArticle[],
-  processedInboxCount: number,
   logLabel: string,
 ): Promise<ReaderSyncResult> {
   await persistArticles(readerDir, mergedArticles);
@@ -147,14 +141,12 @@ async function finalizeReaderSync(
     lastRunAt: status.lastRunAt,
     lastSuccessAt: new Date().toISOString(),
     lastError: null,
-    processedInboxCount,
     importedArticleCount,
   });
 
-  logger.info(`Reader ${logLabel} completed: +${importedArticleCount}, inbox ${processedInboxCount}`, { module: 'Reader' });
+  logger.info(`Reader ${logLabel} completed: +${importedArticleCount}`, { module: 'Reader' });
 
   return {
-    processedInboxCount,
     importedArticleCount,
     generatedBrief,
   };
@@ -183,27 +175,6 @@ async function syncFeeds(readerDir: string, feeds: ReaderFeed[], currentArticles
   return mergeArticles(currentArticles, imported);
 }
 
-async function syncInbox(readerDir: string, currentArticles: ReaderArticle[]) {
-  const files = await readPendingInboxFiles(readerDir);
-  let processedInboxCount = 0;
-  let merged = currentArticles;
-
-  for (const filePath of files) {
-    try {
-      const payload = await readInboxPayload(filePath);
-      const articles = normalizeInboxPayload(payload, filePath);
-      merged = mergeArticles(merged, articles);
-      await moveInboxFile(readerDir, filePath, 'processed');
-      processedInboxCount += 1;
-    } catch (error) {
-      logger.error(`Reader inbox import failed: ${(error as Error).message} (${filePath})`, { module: 'Reader' });
-      await moveInboxFile(readerDir, filePath, 'failed');
-    }
-  }
-
-  return { mergedArticles: merged, processedInboxCount };
-}
-
 export async function getReaderOverview(readerDir: string): Promise<ReaderOverview> {
   await ensureReaderStructure(readerDir);
   const [feeds, articles, savedArticles, status] = await Promise.all([
@@ -212,13 +183,9 @@ export async function getReaderOverview(readerDir: string): Promise<ReaderOvervi
     readReadLater(readerDir),
     readSyncStatus(readerDir),
   ]);
-  const [pendingInbox, processedInbox, failedInbox] = await Promise.all([
-    readInboxBucketStatus(readerDir, 'pending'),
-    readInboxBucketStatus(readerDir, 'processed'),
-    readInboxBucketStatus(readerDir, 'failed'),
-  ]);
-  const brief = (await readDailyBrief(readerDir, todayDate())) || buildDailyBrief(todayDate(), articles);
-  const normalizedArticles = articles.map(normalizeArticleRecord);
+  const normalizedArticles = articles.map(normalizeArticleRecord).filter((article) => article.sourceType === 'rss');
+  const savedRssArticles = savedArticles.map(normalizeArticleRecord).filter((article) => article.sourceType === 'rss');
+  const brief = buildDailyBrief(todayDate(), normalizedArticles);
   const todayArticles = normalizedArticles.filter((article) => article.publishedAt.startsWith(todayDate()));
 
   return {
@@ -227,20 +194,15 @@ export async function getReaderOverview(readerDir: string): Promise<ReaderOvervi
       enabledFeeds: feeds.filter((feed) => feed.enabled).length,
       totalArticles: normalizedArticles.length,
       unreadArticles: normalizedArticles.filter((article) => !article.isRead).length,
-      savedArticles: savedArticles.length,
+      savedArticles: savedRssArticles.length,
       importantArticles: todayArticles.filter((article) => article.importance >= 4).length,
       todayArticles: todayArticles.length,
     },
     brief,
     categories: brief.sections,
-    savedArticles,
+    savedArticles: savedRssArticles,
     latestArticles: normalizedArticles.slice(0, 20),
     syncStatus: status,
-    inboxStatus: {
-      pending: pendingInbox,
-      processed: processedInbox,
-      failed: failedInbox,
-    },
     readerDir,
   };
 }
@@ -278,9 +240,9 @@ export async function syncReaderNow(readerDir: string): Promise<ReaderSyncResult
 
   try {
     const [feeds, currentArticles] = await Promise.all([readFeeds(readerDir), readAllArticles(readerDir)]);
-    const afterFeedSync = await syncFeeds(readerDir, feeds, currentArticles);
-    const { mergedArticles, processedInboxCount } = await syncInbox(readerDir, afterFeedSync);
-    return finalizeReaderSync(readerDir, status, currentArticles, mergedArticles, processedInboxCount, 'full sync');
+    const currentRssArticles = currentArticles.filter((article) => article.sourceType === 'rss');
+    const mergedArticles = await syncFeeds(readerDir, feeds, currentRssArticles);
+    return finalizeReaderSync(readerDir, status, currentRssArticles, mergedArticles, 'RSS sync');
   } catch (error) {
     await markReaderSyncFailed(readerDir, status, error);
     throw error;
@@ -293,22 +255,9 @@ export async function pullReaderSubscriptions(readerDir: string): Promise<Reader
 
   try {
     const [feeds, currentArticles] = await Promise.all([readFeeds(readerDir), readAllArticles(readerDir)]);
-    const mergedArticles = await syncFeeds(readerDir, feeds, currentArticles);
-    return finalizeReaderSync(readerDir, status, currentArticles, mergedArticles, 0, 'subscription pull');
-  } catch (error) {
-    await markReaderSyncFailed(readerDir, status, error);
-    throw error;
-  }
-}
-
-export async function refreshReaderLocalInbox(readerDir: string): Promise<ReaderSyncResult> {
-  await ensureReaderStructure(readerDir);
-  const status = await markReaderSyncStarted(readerDir);
-
-  try {
-    const currentArticles = await readAllArticles(readerDir);
-    const { mergedArticles, processedInboxCount } = await syncInbox(readerDir, currentArticles);
-    return finalizeReaderSync(readerDir, status, currentArticles, mergedArticles, processedInboxCount, 'local refresh');
+    const currentRssArticles = currentArticles.filter((article) => article.sourceType === 'rss');
+    const mergedArticles = await syncFeeds(readerDir, feeds, currentRssArticles);
+    return finalizeReaderSync(readerDir, status, currentRssArticles, mergedArticles, 'RSS subscription pull');
   } catch (error) {
     await markReaderSyncFailed(readerDir, status, error);
     throw error;
@@ -317,7 +266,7 @@ export async function refreshReaderLocalInbox(readerDir: string): Promise<Reader
 
 export async function rebuildReaderBrief(readerDir: string): Promise<ReaderDailyBrief> {
   await ensureReaderStructure(readerDir);
-  const articles = await readAllArticles(readerDir);
+  const articles = (await readAllArticles(readerDir)).filter((article) => article.sourceType === 'rss');
   const generatedBrief = buildDailyBrief(todayDate(), articles);
   await saveDailyBrief(readerDir, generatedBrief);
   logger.info(`Reader brief rebuilt: ${generatedBrief.total} articles`, { module: 'Reader' });
@@ -327,7 +276,7 @@ export async function rebuildReaderBrief(readerDir: string): Promise<ReaderDaily
 export async function getReaderArticles(readerDir: string, options: {
   category?: string;
   date?: string;
-  sourceType?: 'rss' | 'openclaw';
+  sourceType?: 'rss';
   savedOnly?: boolean;
   unreadOnly?: boolean;
   limit?: number;
@@ -338,6 +287,7 @@ export async function getReaderArticles(readerDir: string, options: {
 
   return articles
     .map(normalizeArticleRecord)
+    .filter((article) => article.sourceType === 'rss')
     .map((article) => ({ ...article, savedAt: savedIds.has(article.id) ? article.savedAt || new Date().toISOString() : article.savedAt }))
     .filter((article) => (options.category ? article.category === options.category : true))
     .filter((article) => (options.date ? article.publishedAt.slice(0, 10) === options.date : true))
@@ -390,12 +340,7 @@ export async function removeReaderArticleFromLater(readerDir: string, articleId:
 }
 
 export async function getReaderDailyBrief(readerDir: string, date: string): Promise<ReaderDailyBrief> {
-  const brief = await readDailyBrief(readerDir, date);
-  if (brief) {
-    return brief;
-  }
-
-  const articles = await readAllArticles(readerDir);
+  const articles = (await readAllArticles(readerDir)).filter((article) => article.sourceType === 'rss');
   const generated = buildDailyBrief(date, articles);
   await saveDailyBrief(readerDir, generated);
   return generated;
@@ -438,9 +383,9 @@ export async function summarizeReaderArticle(readerDir: string, articleId: strin
     return null;
   }
 
-  const aiSummary = await summarizeArticleWithOpenClaw(article);
+  const aiSummary = await summarizeArticleWithAi(article);
   if (!aiSummary || aiSummary.length === 0) {
-    throw new Error('OpenClaw 未返回可用摘要');
+    throw new Error('AI 未返回可用摘要');
   }
 
   const updated = {

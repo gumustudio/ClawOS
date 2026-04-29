@@ -13,7 +13,6 @@ import {
   markReaderArticle,
   pullReaderSubscriptions,
   rebuildReaderBrief,
-  refreshReaderLocalInbox,
   removeReaderArticleFromLater,
   saveReaderArticleForLater,
   summarizeReaderArticle,
@@ -100,16 +99,6 @@ router.post('/pull', async (_req, res) => {
   }
 });
 
-router.post('/refresh', async (_req, res) => {
-  try {
-    const result = await refreshReaderLocalInbox(await getReaderDir());
-    res.json({ success: true, data: result });
-  } catch (error) {
-    logger.error(`Reader refresh failed: ${(error as Error).message}`, { module: 'Reader' });
-    res.status(500).json({ success: false, error: (error as Error).message });
-  }
-});
-
 router.post('/brief/rebuild', async (_req, res) => {
   try {
     const result = await rebuildReaderBrief(await getReaderDir());
@@ -122,10 +111,14 @@ router.post('/brief/rebuild', async (_req, res) => {
 
 router.get('/articles', async (req, res) => {
   try {
+    if (typeof req.query.source === 'string' && req.query.source !== 'rss') {
+      return res.status(400).json({ success: false, error: 'Reader source only supports rss' });
+    }
+
     const data = await getReaderArticles(await getReaderDir(), {
       category: typeof req.query.category === 'string' ? req.query.category : undefined,
       date: typeof req.query.date === 'string' ? req.query.date : undefined,
-      sourceType: req.query.source === 'rss' || req.query.source === 'openclaw' ? req.query.source : undefined,
+      sourceType: req.query.source === 'rss' ? req.query.source : undefined,
       savedOnly: req.query.saved === '1',
       unreadOnly: req.query.unread === '1',
       limit: typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined,

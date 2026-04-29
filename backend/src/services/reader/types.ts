@@ -2,7 +2,7 @@ export const READER_CATEGORIES = ['AI', '科技', '财经', '新闻', '游戏', 
 
 export type ReaderCategory = typeof READER_CATEGORIES[number];
 
-export type ReaderSourceType = 'rss' | 'openclaw';
+export type ReaderSourceType = 'rss';
 
 export interface ReaderFeed {
   id: string;
@@ -71,17 +71,6 @@ export interface ReaderStats {
   todayArticles: number;
 }
 
-export interface ReaderInboxBucketStatus {
-  count: number;
-  files: string[];
-}
-
-export interface ReaderInboxStatus {
-  pending: ReaderInboxBucketStatus;
-  processed: ReaderInboxBucketStatus;
-  failed: ReaderInboxBucketStatus;
-}
-
 export interface ReaderOverview {
   stats: ReaderStats;
   brief: ReaderDailyBrief;
@@ -89,7 +78,6 @@ export interface ReaderOverview {
   savedArticles: ReaderArticle[];
   latestArticles: ReaderArticle[];
   syncStatus: ReaderSyncStatus;
-  inboxStatus: ReaderInboxStatus;
   readerDir: string;
 }
 
@@ -97,32 +85,10 @@ export interface ReaderSyncStatus {
   lastRunAt: string | null;
   lastSuccessAt: string | null;
   lastError: string | null;
-  processedInboxCount: number;
   importedArticleCount: number;
 }
 
-export interface ReaderInboxPayload {
-  version: '1.0';
-  source: 'openclaw';
-  generatedAt: string;
-  taskName?: string;
-  items: Array<{
-    id?: string;
-    title: string;
-    url: string;
-    content?: string;
-    summary?: string[];
-    keywords?: string[];
-    category?: ReaderCategory;
-    importance?: number;
-    publishedAt?: string;
-    author?: string;
-    imageUrl?: string;
-  }>;
-}
-
 export interface ReaderSyncResult {
-  processedInboxCount: number;
   importedArticleCount: number;
   generatedBrief: ReaderDailyBrief;
 }

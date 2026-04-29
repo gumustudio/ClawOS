@@ -22,7 +22,6 @@ import {
   fetchReaderOverview,
   markReaderArticleRead,
   pullReaderSubscriptions,
-  refreshReaderLocalInbox,
   saveReaderArticle,
   summarizeReaderArticle,
   translateReaderArticle,
@@ -50,7 +49,6 @@ export default function ReaderApp() {
   const [loading, setLoading] = useState(true)
   const [loadingArticles, setLoadingArticles] = useState(false)
   const [loadingMoreArticles, setLoadingMoreArticles] = useState(false)
-  const [refreshing, setRefreshing] = useState(false)
   const [pullingSubscriptions, setPullingSubscriptions] = useState(false)
   const [showFeedDialog, setShowFeedDialog] = useState(false)
   const [feedDialog, setFeedDialog] = useState<FeedDialogState>({ name: '', url: '', category: 'AI' })
@@ -89,8 +87,6 @@ export default function ReaderApp() {
   const currentSection = useMemo(() => {
     return overview?.brief.sections.find((section) => section.category === activeCategory) || null
   }, [overview, activeCategory])
-
-  const openClawCount = useMemo(() => overview?.latestArticles.filter((article) => article.sourceType === 'openclaw').length ?? 0, [overview])
 
   async function loadOverview() {
     setLoading(true)
@@ -144,14 +140,6 @@ export default function ReaderApp() {
         return
       }
 
-      if (view === 'openclaw') {
-        const nextArticles = await fetchReaderArticles({ source: 'openclaw', limit: 50, offset: nextOffset })
-        setArticles(nextArticles)
-        setHasMoreArticles(false)
-        setActiveArticle((current) => nextArticles.find((article) => article.id === current?.id) || nextArticles[0] || null)
-        return
-      }
-
       if (view === 'feeds') {
         const nextArticles = await fetchReaderArticles({ limit: 50, offset: nextOffset })
         setArticles(nextArticles)
@@ -184,28 +172,13 @@ export default function ReaderApp() {
     await loadViewArticles('brief', activeCategory, articleOffset, true)
   }
 
-  async function handleRefresh() {
-    setRefreshing(true)
-    try {
-      const result = await refreshReaderLocalInbox()
-      await loadOverview()
-      await loadViewArticles(activeView, activeCategory)
-      setToast({ tone: 'success', message: `已刷新本地资讯，导入 ${result.importedArticleCount} 条，处理 ${result.processedInboxCount} 个投递文件` })
-    } catch (error) {
-      console.error('Failed to refresh reader inbox', error)
-      setToast({ tone: 'error', message: error instanceof Error ? error.message : '刷新本地资讯失败' })
-    } finally {
-      setRefreshing(false)
-    }
-  }
-
   async function handlePullSubscriptions() {
     setPullingSubscriptions(true)
     try {
       const result = await pullReaderSubscriptions()
       await loadOverview()
       await loadViewArticles(activeView, activeCategory)
-      setToast({ tone: 'success', message: `已拉取最新订阅，新增 ${result.importedArticleCount} 条` })
+      setToast({ tone: 'success', message: `已拉取 RSS 订阅，新增 ${result.importedArticleCount} 条` })
     } catch (error) {
       console.error('Failed to pull reader subscriptions', error)
       setToast({ tone: 'error', message: error instanceof Error ? error.message : '拉取订阅失败' })
@@ -385,22 +358,6 @@ export default function ReaderApp() {
     window.open(target, '_blank', 'noopener,noreferrer')
   }
 
-  function openReaderInboxDir() {
-    const base = withBasePath('/proxy/filebrowser/files')
-    const target = readerDir ? `${base}${readerDir}/inbox/pending` : withBasePath('/proxy/filebrowser/')
-    window.open(target, '_blank', 'noopener,noreferrer')
-  }
-
-  async function copyOpenClawSpecPath() {
-    const content = 'docs/openclaw-daily-brief-task-template.md'
-    try {
-      await navigator.clipboard.writeText(content)
-      setToast({ tone: 'success', message: '已复制 OpenClaw 模板文档路径' })
-    } catch {
-      setToast({ tone: 'error', message: content })
-    }
-  }
-
   function renderSidebarButton(view: ReaderView, label: string, hint?: string) {
     const active = activeView === view
     return (
@@ -438,7 +395,6 @@ export default function ReaderApp() {
         <div className="space-y-2 border-b border-orange-100 p-3">
           {renderSidebarButton('brief', '今日简报', overview ? `收录 ${overview.brief.total} 篇 | 已加载 ${articles.length} 篇` : undefined)}
           {renderSidebarButton('category', '领域浏览', currentSection ? `${currentSection.category} · 今日 ${currentSection.total} 篇` : '按五大领域浏览')}
-          {renderSidebarButton('openclaw', 'OpenClaw资讯', overview ? `待处理 ${overview.inboxStatus.pending.count} | 失败 ${overview.inboxStatus.failed.count}` : openClawCount > 0 ? `最近 ${openClawCount} 篇本地投递` : '单独查看本地投递资讯')}
           {renderSidebarButton('saved', '稍后阅读', overview ? `${overview.stats.savedArticles} 篇已收藏` : undefined)}
           {renderSidebarButton('feeds', '订阅管理', overview ? `${overview.stats.totalFeeds} 个订阅源` : undefined)}
         </div>
@@ -470,7 +426,6 @@ export default function ReaderApp() {
             <div className="mt-3 space-y-2 text-xs text-slate-500">
               <div>最近执行：{overview?.syncStatus.lastRunAt ? formatReaderDate(overview.syncStatus.lastRunAt) : '暂无'}</div>
               <div>最近成功：{overview?.syncStatus.lastSuccessAt ? formatReaderDate(overview.syncStatus.lastSuccessAt) : '暂无'}</div>
-              <div>Inbox 导入：{overview?.syncStatus.processedInboxCount ?? 0}</div>
               {overview?.syncStatus.lastError && <div className="rounded-lg bg-red-50 px-3 py-2 text-red-600">{overview.syncStatus.lastError}</div>}
             </div>
             <button type="button" onClick={() => setShowClearDialog(true)} className="mt-4 w-full rounded-xl border border-red-200 px-3 py-2 text-sm text-red-600 transition-colors hover:bg-red-50">清理 Reader 运行数据</button>
@@ -485,38 +440,26 @@ export default function ReaderApp() {
               <div className="text-sm font-semibold text-slate-800">
                 {activeView === 'brief' && '今日简报'}
                 {activeView === 'category' && `${activeCategory} 领域`}
-                {activeView === 'openclaw' && 'OpenClaw资讯'}
                 {activeView === 'saved' && '稍后阅读'}
                 {activeView === 'feeds' && '订阅管理'}
               </div>
               <div className="mt-1 text-xs text-slate-500">
                 {activeView === 'brief' && `今日收录 ${overview?.brief.total ?? 0} 篇，已加载 ${articles.length} 篇，滚动到底部会继续加载`}
                 {activeView === 'category' && '查看该领域的热门和最新资讯'}
-                {activeView === 'openclaw' && `只显示 OpenClaw 或本地任务投递资讯，当前待处理 ${overview?.inboxStatus.pending.count ?? 0} 个文件`}
                 {activeView === 'saved' && '留到稍后集中阅读'}
                 {activeView === 'feeds' && '预设源 + 自定义订阅源'}
               </div>
             </div>
-            {(activeView === 'brief' || activeView === 'openclaw') && (
+            {activeView === 'brief' && (
               <div className="flex shrink-0 items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => void handleRefresh()}
-                  disabled={refreshing || pullingSubscriptions}
-                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => void handlePullSubscriptions()}
+                  disabled={pullingSubscriptions}
+                  className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700 transition-colors hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {refreshing ? '刷新中...' : '刷新'}
+                  {pullingSubscriptions ? '拉取中...' : '拉取最新订阅'}
                 </button>
-                {activeView === 'brief' && (
-                  <button
-                    type="button"
-                    onClick={() => void handlePullSubscriptions()}
-                    disabled={refreshing || pullingSubscriptions}
-                    className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700 transition-colors hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {pullingSubscriptions ? '拉取中...' : '拉取最新订阅'}
-                  </button>
-                )}
               </div>
             )}
           </div>
@@ -575,9 +518,7 @@ export default function ReaderApp() {
                       <div className="mb-2 flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2">
                           <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500">{article.category}</span>
-                          <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${article.sourceType === 'openclaw' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700'}`}>
-                            {article.sourceType === 'openclaw' ? 'OpenClaw' : 'RSS'}
-                          </span>
+                          <span className="rounded-full bg-sky-100 px-2 py-1 text-[11px] font-medium text-sky-700">RSS</span>
                         </div>
                         <span className="text-[11px] text-amber-600">{importanceStars(article.importance)}</span>
                       </div>
@@ -606,9 +547,7 @@ export default function ReaderApp() {
             <div className="mx-auto max-w-4xl px-8 py-8 lg:px-12">
               <div className="mb-6 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                 <span className="rounded-full bg-orange-100 px-2 py-1 font-medium text-orange-700">{activeArticle.category}</span>
-                <span className={`rounded-full px-2 py-1 font-medium ${activeArticle.sourceType === 'openclaw' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700'}`}>
-                  {activeArticle.sourceType === 'openclaw' ? 'OpenClaw 投递' : 'RSS 订阅'}
-                </span>
+                <span className="rounded-full bg-sky-100 px-2 py-1 font-medium text-sky-700">RSS 订阅</span>
                 <span>{formatReaderDate(activeArticle.publishedAt)}</span>
                 <span>{activeArticle.readTime} 分钟</span>
                 <span>{importanceStars(activeArticle.importance)}</span>
@@ -708,37 +647,32 @@ export default function ReaderApp() {
               <ReaderIcon className="mb-5 h-16 w-16 opacity-40" />
               <h3 className="text-2xl font-bold text-slate-900">每日简报已准备就绪</h3>
               <p className="mt-3 text-sm leading-7 text-slate-500">
-                现在可以从两条链路给它喂资讯：一是保留 RSS 订阅源定时抓取，二是让 OpenClaw 直接把整理好的 JSON 写入
-                <span className="mx-1 rounded bg-slate-100 px-2 py-1 font-mono text-slate-700">{readerDir}/inbox/pending</span>
-                。
+                现在每日简报只保留 RSS 订阅源逻辑。你可以在“订阅管理”里维护 RSS 源，系统会定时拉取并生成每日简报。
               </p>
 
               <div className="mt-6 grid gap-4 md:grid-cols-2">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-left">
-                  <div className="text-sm font-semibold text-slate-800">OpenClaw 投递入口</div>
-                  <div className="mt-2 text-xs leading-6 text-slate-500">把定时资讯任务的输出文件写到 `inbox/pending`，ClawOS 会在你点击“刷新”时自动导入并生成简报。</div>
+                  <div className="text-sm font-semibold text-slate-800">RSS 订阅源</div>
+                  <div className="mt-2 text-xs leading-6 text-slate-500">预设源会自动保留，你也可以手动添加新的 RSS 地址。</div>
                   <div className="mt-4 flex flex-wrap gap-2">
-                    <button type="button" onClick={openReaderInboxDir} className="rounded-xl bg-white px-3 py-2 text-sm text-slate-700 shadow-sm transition-colors hover:bg-slate-100">打开投递目录</button>
-                    <button type="button" onClick={() => void copyOpenClawSpecPath()} className="rounded-xl bg-white px-3 py-2 text-sm text-slate-700 shadow-sm transition-colors hover:bg-slate-100">复制模板文档路径</button>
+                    <button type="button" onClick={() => setActiveView('feeds')} className="rounded-xl bg-white px-3 py-2 text-sm text-slate-700 shadow-sm transition-colors hover:bg-slate-100">管理订阅源</button>
+                    <button type="button" onClick={() => void handlePullSubscriptions()} className="rounded-xl bg-white px-3 py-2 text-sm text-slate-700 shadow-sm transition-colors hover:bg-slate-100">拉取最新订阅</button>
                   </div>
                 </div>
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-left">
-                  <div className="text-sm font-semibold text-slate-800">本地样例文件</div>
-                  <div className="mt-2 text-xs leading-6 text-slate-500">机器本地已经放好了样例与说明，你后续让 OpenClaw 照着写就行。</div>
-                  <div className="mt-4 space-y-2 text-xs text-slate-600">
-                    <div className="rounded-xl bg-white px-3 py-2 font-mono">{readerDir}/config/openclaw-payload.example.json</div>
-                    <div className="rounded-xl bg-white px-3 py-2 font-mono">{readerDir}/config/OPENCLAW_TASK_TEMPLATE.md</div>
-                  </div>
+                  <div className="text-sm font-semibold text-slate-800">工作目录</div>
+                  <div className="mt-2 text-xs leading-6 text-slate-500">RSS 配置、文章、简报和稍后阅读数据都保存在本地 Reader 工作目录。</div>
+                  <div className="mt-4 rounded-xl bg-white px-3 py-2 text-xs font-mono text-slate-600">{readerDir}</div>
                 </div>
               </div>
 
               <div className="mt-6 rounded-2xl border border-orange-100 bg-orange-50/70 p-5 text-left">
                 <div className="text-sm font-semibold text-orange-800">建议下一步</div>
                 <div className="mt-2 text-sm leading-7 text-orange-900/80">
-                  先在 OpenClaw 里建一个 `07:55` 的资讯整理任务，按模板输出 10-20 条 JSON 资讯到 `inbox/pending`。然后回到这里点一次“刷新”，就能看到第一版真实简报；如果还想补抓 RSS，再点“拉取最新订阅”。
+                  先确认订阅源列表，再点击“拉取最新订阅”。系统会按 RSS 内容自动分类、去重并生成今日简报。
                 </div>
                 <div className="mt-4">
-                  <button type="button" onClick={() => void handleRefresh()} className="rounded-xl bg-orange-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-orange-600">刷新本地资讯</button>
+                  <button type="button" onClick={() => void handlePullSubscriptions()} className="rounded-xl bg-orange-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-orange-600">拉取最新订阅</button>
                 </div>
               </div>
             </div>
@@ -756,7 +690,7 @@ export default function ReaderApp() {
         <div className="absolute inset-0 z-[170] flex items-center justify-center bg-slate-900/20 backdrop-blur-sm" onClick={() => setShowFeedDialog(false)}>
           <div className="w-[460px] rounded-3xl border border-white/70 bg-white/95 p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <h3 className="text-lg font-bold text-slate-800">新增订阅源</h3>
-            <p className="mt-2 text-sm leading-6 text-slate-500">支持你手动添加新的 RSS 源，OpenClaw 投递资讯不需要在这里配置。</p>
+            <p className="mt-2 text-sm leading-6 text-slate-500">支持你手动添加新的 RSS 源，保存后会参与后续订阅拉取和每日简报生成。</p>
             <div className="mt-5 space-y-4">
               <div>
                 <label className="mb-2 block text-sm font-medium text-slate-700">名称</label>
@@ -798,7 +732,7 @@ export default function ReaderApp() {
         <div className="absolute inset-0 z-[170] flex items-center justify-center bg-slate-900/20 backdrop-blur-sm" onClick={() => setShowClearDialog(false)}>
           <div className="w-[460px] rounded-3xl border border-white/70 bg-white/95 p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <h3 className="text-lg font-bold text-slate-800">清理 Reader 运行数据</h3>
-            <p className="mt-2 text-sm leading-6 text-slate-500">会删除已抓取文章、简报、稍后阅读和缓存，但保留订阅源配置、OpenClaw 模板和目录结构，便于你重新做拟真测试。</p>
+            <p className="mt-2 text-sm leading-6 text-slate-500">会删除已抓取文章、简报、稍后阅读和缓存，但保留 RSS 订阅源配置。</p>
             <div className="mt-6 flex justify-end gap-3">
               <button type="button" onClick={() => setShowClearDialog(false)} className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100">取消</button>
               <button type="button" onClick={() => void handleClearRuntimeData()} className="rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700">确认清理</button>

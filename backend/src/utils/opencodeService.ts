@@ -21,10 +21,11 @@ export interface OpenCodeServiceStatus {
 }
 
 export function getOpenCodeBasicAuthHeader(): string {
-  if (!OPENCODE_SERVER_PASSWORD) {
-    throw new Error('OPENCODE_SERVER_PASSWORD is not configured');
-  }
   return `Basic ${Buffer.from(`${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}`).toString('base64')}`;
+}
+
+export function hasOpenCodeServerPassword(): boolean {
+  return OPENCODE_SERVER_PASSWORD.length > 0;
 }
 
 export function hasOpenCodeAppLockPassword(): boolean {
@@ -51,6 +52,10 @@ async function getSystemdActiveState(): Promise<string> {
 }
 
 async function probeOpenCodeHealth(): Promise<{ health: OpenCodeServiceStatus['health']; detail: string }> {
+  if (!hasOpenCodeServerPassword()) {
+    return { health: 'down', detail: 'OPENCODE_SERVER_PASSWORD is not configured' };
+  }
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2500);

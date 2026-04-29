@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { clearReaderRuntimeData, createReaderFeed, fetchReaderArticles, pullReaderSubscriptions, refreshReaderLocalInbox, summarizeReaderArticle, syncReaderNow, translateReaderArticle } from './api'
+import { clearReaderRuntimeData, createReaderFeed, fetchReaderArticles, pullReaderSubscriptions, summarizeReaderArticle, syncReaderNow, translateReaderArticle } from './api'
 
 function mockWindowPathname(pathname: string) {
   Object.defineProperty(globalThis, 'window', {
@@ -36,7 +36,7 @@ test('fetchReaderArticles includes category and saved filters', async () => {
   }
 })
 
-test('fetchReaderArticles includes source filter', async () => {
+test('fetchReaderArticles includes rss source filter', async () => {
   const originalFetch = global.fetch
   const originalWindow = (globalThis as { window?: Window }).window
   let requestedUrl = ''
@@ -51,8 +51,8 @@ test('fetchReaderArticles includes source filter', async () => {
   }) as unknown as typeof fetch
 
   try {
-    await fetchReaderArticles({ source: 'openclaw', limit: 10 })
-    assert.match(requestedUrl, /source=openclaw/)
+    await fetchReaderArticles({ source: 'rss', limit: 10 })
+    assert.match(requestedUrl, /source=rss/)
   } finally {
     global.fetch = originalFetch
     Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true })
@@ -94,7 +94,7 @@ test('syncReaderNow triggers post request', async () => {
   global.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
     method = String(init?.method || 'GET')
     return {
-      json: async () => ({ success: true, data: { processedInboxCount: 1, importedArticleCount: 2 } }),
+      json: async () => ({ success: true, data: { importedArticleCount: 2 } }),
     } as Response
   }) as unknown as typeof fetch
 
@@ -119,7 +119,7 @@ test('pullReaderSubscriptions triggers post request', async () => {
     requestedUrl = String(input)
     method = String(init?.method || 'GET')
     return {
-      json: async () => ({ success: true, data: { processedInboxCount: 0, importedArticleCount: 3 } }),
+      json: async () => ({ success: true, data: { importedArticleCount: 3 } }),
     } as Response
   }) as unknown as typeof fetch
 
@@ -127,32 +127,6 @@ test('pullReaderSubscriptions triggers post request', async () => {
     await pullReaderSubscriptions()
     assert.equal(method, 'POST')
     assert.match(requestedUrl, /\/api\/system\/reader\/pull/)
-  } finally {
-    global.fetch = originalFetch
-    Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true })
-  }
-})
-
-test('refreshReaderLocalInbox triggers post request', async () => {
-  const originalFetch = global.fetch
-  const originalWindow = (globalThis as { window?: Window }).window
-  let requestedUrl = ''
-  let method = 'GET'
-
-  mockWindowPathname('/')
-
-  global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    requestedUrl = String(input)
-    method = String(init?.method || 'GET')
-    return {
-      json: async () => ({ success: true, data: { processedInboxCount: 1, importedArticleCount: 2 } }),
-    } as Response
-  }) as unknown as typeof fetch
-
-  try {
-    await refreshReaderLocalInbox()
-    assert.equal(method, 'POST')
-    assert.match(requestedUrl, /\/api\/system\/reader\/refresh/)
   } finally {
     global.fetch = originalFetch
     Object.defineProperty(globalThis, 'window', { value: originalWindow, configurable: true })

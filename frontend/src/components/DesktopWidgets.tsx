@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import {
   ArrowDownTrayIcon,
   MusicalNoteIcon,
-  CalendarDaysIcon,
   PlusIcon,
   PlayIcon,
   PauseIcon,
@@ -21,6 +20,7 @@ import { didaApi } from '../apps/DidaApp/api'
 import { getNaturalTimeFragments, parseNaturalTaskInput } from '../apps/DidaApp/naturalInput'
 import type { Project, Task } from '../apps/DidaApp/types'
 import { buildDidaInboxWidgetModel } from '../apps/didaWidgetMeta'
+import { DidaIcon } from './Icons'
 
 interface DownloadCounts {
   active: number
@@ -35,6 +35,27 @@ interface DownloadWidgetResponse {
   message?: string
   tasks: DownloadWidgetTask[]
   counts: DownloadCounts
+}
+
+interface WeatherWidgetState {
+  temperature: number
+  humidity: number
+  windSpeed: number
+  label: string
+  updatedAt: Date
+}
+
+const XIAOSHAN_WEATHER_URL = 'https://api.open-meteo.com/v1/forecast?latitude=30.167&longitude=120.263&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&timezone=Asia%2FShanghai'
+
+function getWeatherLabel(code: number): string {
+  if (code === 0) return '晴'
+  if ([1, 2, 3].includes(code)) return '多云'
+  if ([45, 48].includes(code)) return '有雾'
+  if ([51, 53, 55, 56, 57].includes(code)) return '毛毛雨'
+  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return '降雨'
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return '降雪'
+  if ([95, 96, 99].includes(code)) return '雷阵雨'
+  return '天气更新'
 }
 
 function createEmptyDownloadCounts(): DownloadCounts {
@@ -75,7 +96,8 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
   const [downloadCounts, setDownloadCounts] = useState<DownloadCounts>(createEmptyDownloadCounts())
   const [downloadAvailable, setDownloadAvailable] = useState(true)
   const [time, setTime] = useState(new Date())
-  const [nextCron, setNextCron] = useState<string>('无计划任务')
+  const [weather, setWeather] = useState<WeatherWidgetState | null>(null)
+  const [weatherError, setWeatherError] = useState(false)
   const [musicState, setMusicState] = useState<{ appId: string; playing: boolean; title: string; artist: string; cover: string; lyric: string } | null>(null)
   const [didaAuthorized, setDidaAuthorized] = useState(false)
   const [didaError, setDidaError] = useState<string | null>(null)
@@ -120,17 +142,35 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
       }
     }
 
-    const fetchCron = async () => {
+    const fetchWeather = async () => {
       try {
-        const res = await fetch(withBasePath('/api/system/cron'))
-        const json = await res.json()
-        if (json.success && json.data.length > 0) {
-          const enabled = json.data.filter((item: any) => item.enabled)
-          if (enabled.length > 0) {
-            setNextCron(`[${enabled[0].name}] ${enabled[0].schedule}`)
+        const res = await fetch(XIAOSHAN_WEATHER_URL)
+        if (!res.ok) {
+          throw new Error(`weather request failed: ${res.status}`)
+        }
+        const json = await res.json() as {
+          current?: {
+            temperature_2m?: number
+            relative_humidity_2m?: number
+            weather_code?: number
+            wind_speed_10m?: number
           }
         }
-      } catch {}
+        const current = json.current
+        if (!current || typeof current.temperature_2m !== 'number' || typeof current.weather_code !== 'number') {
+          throw new Error('weather response missing current data')
+        }
+        setWeather({
+          temperature: current.temperature_2m,
+          humidity: typeof current.relative_humidity_2m === 'number' ? current.relative_humidity_2m : 0,
+          windSpeed: typeof current.wind_speed_10m === 'number' ? current.wind_speed_10m : 0,
+          label: getWeatherLabel(current.weather_code),
+          updatedAt: new Date(),
+        })
+        setWeatherError(false)
+      } catch {
+        setWeatherError(true)
+      }
     }
 
     const fetchDida = async () => {
@@ -159,7 +199,7 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
 
     void fetchHwNet()
     void fetchDownloads()
-    void fetchCron()
+    void fetchWeather()
     void fetchDida()
 
     const statInterval = setInterval(() => {
@@ -172,9 +212,14 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
       void fetchDida()
     }, 60000)
 
+    const weatherInterval = setInterval(() => {
+      void fetchWeather()
+    }, 30 * 60 * 1000)
+
     return () => {
       clearInterval(statInterval)
       clearInterval(didaInterval)
+      clearInterval(weatherInterval)
     }
   }, [authReady])
 
@@ -258,16 +303,11 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
   return (
     <div className="absolute right-8 top-16 w-[600px] z-10">
       <div className="grid grid-cols-2 auto-rows-[160px] gap-4 h-full pb-8">
-        <div className="row-span-2 rounded-[26px] bg-white/94 border border-white/80 shadow-[0_18px_48px_rgba(15,23,42,0.12)] px-4 pt-3 pb-3 text-slate-800 flex flex-col overflow-hidden">
+        <div className="row-span-2 bg-white/40 backdrop-blur-xl border border-white/40 shadow-lg rounded-2xl px-4 pt-3 pb-3 text-slate-800 flex flex-col overflow-hidden">
           <div className="flex items-center justify-between gap-3 mb-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-[10px] bg-[#4a76f6] flex items-center justify-center">
-                  <svg viewBox="0 0 20 20" fill="none" className="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M10 2.5A7.5 7.5 0 1 0 17.5 10" stroke="#ffffff" strokeWidth="2.5" />
-                    <path d="M6.5 10.2L9.5 13.2L15.4 6.6" stroke="#ffd54f" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </div>
+                <DidaIcon className="w-5 h-5 flex-shrink-0" />
                 <span className="text-[14px] font-semibold tracking-tight">{didaModel.inboxName}</span>
               </div>
               <p className="mt-0.5 text-[11px] text-slate-500">{didaAuthorized ? `待办 ${didaModel.pendingCount} 项` : '未授权'}</p>
@@ -275,7 +315,7 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
             <button
               type="button"
               onClick={onOpenDida}
-              className="w-7 h-7 rounded-full bg-slate-100 hover:bg-slate-200 transition-colors flex items-center justify-center text-slate-500"
+                className="w-7 h-7 rounded-full bg-white/30 hover:bg-white/50 transition-colors flex items-center justify-center text-slate-500"
             >
               <EllipsisHorizontalIcon className="w-3.5 h-3.5" />
             </button>
@@ -283,7 +323,7 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
 
           {didaAuthorized ? (
             <>
-              <div className="rounded-[18px] bg-slate-100/95 px-2.5 py-2 border border-slate-200/80 mb-3">
+              <div className="rounded-xl bg-white/30 px-2.5 py-2 border border-white/25 mb-3">
                 <div className="flex items-center gap-2">
                 <PlusIcon className="w-3.5 h-3.5 text-[#4a76f6] flex-shrink-0" />
                 <input
@@ -336,7 +376,7 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
                     {didaModel.tasks.map((task) => {
                       const isToggling = didaTogglingIds.includes(task.id)
                       return (
-                        <div key={task.id} className="flex items-center gap-2.5 rounded-[16px] px-1.5 py-1.5 hover:bg-slate-50 transition-colors group">
+                        <div key={task.id} className="flex items-center gap-2.5 rounded-xl px-1.5 py-1.5 hover:bg-white/25 transition-colors group">
                           <button
                             type="button"
                             onClick={() => void handleToggleDidaTask(task.id)}
@@ -357,7 +397,7 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
                   </div>
                 </div>
               ) : (
-                <div className="flex-1 flex flex-col items-center justify-center text-center rounded-[20px] bg-slate-50 text-slate-400 px-6">
+                <div className="flex-1 flex flex-col items-center justify-center text-center rounded-xl bg-white/20 text-slate-400 px-6 border border-white/10 border-dashed">
                   <CheckIcon className="w-7 h-7 mb-2 text-[#4a76f6]" />
                   <p className="text-[13px] font-medium text-slate-600 mb-0.5">收集箱清空了</p>
                   <p className="text-[11px]">先加一条待办</p>
@@ -368,7 +408,7 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
             <button
               type="button"
               onClick={onOpenDida}
-              className="flex-1 rounded-[20px] bg-slate-50 border border-dashed border-slate-200 flex flex-col items-center justify-center text-center px-6"
+              className="flex-1 rounded-xl bg-white/20 border border-dashed border-white/20 flex flex-col items-center justify-center text-center px-6"
             >
               <ExclamationTriangleIcon className="w-7 h-7 text-amber-400 mb-2.5" />
               <p className="text-[13px] font-medium text-slate-700 mb-1">滴答未连接</p>
@@ -382,15 +422,18 @@ export default function DesktopWidgets({ onOpenDownloads, onOpenDida, authReady 
 
         <div className="h-full bg-white/40 backdrop-blur-xl border border-white/40 shadow-lg rounded-2xl p-5 text-slate-800 flex flex-col justify-center relative overflow-hidden group">
           <div className="absolute -right-4 -top-4 text-white/20">
-            <CalendarDaysIcon className="w-32 h-32" />
+            <CloudIcon className="w-32 h-32" />
           </div>
           <div className="relative z-10 flex flex-col h-full justify-center">
             <h2 className="text-4xl font-light tracking-tight mb-1">{time.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</h2>
             <p className="text-sm font-medium text-slate-600 mb-3">{time.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })}</p>
             <div className="flex items-center text-xs text-slate-500 bg-white/30 rounded-lg px-2 py-1.5 border border-white/20 w-fit max-w-[240px] truncate">
-              <span className="font-semibold mr-1 flex-shrink-0">下个任务:</span>
-              <span className="truncate">{nextCron}</span>
+              <span className="font-semibold mr-1 flex-shrink-0">杭州萧山:</span>
+              <span className="truncate">
+                {weather ? `${weather.label} ${Math.round(weather.temperature)}°C · 湿度 ${Math.round(weather.humidity)}%` : weatherError ? '天气暂不可用' : '天气更新中'}
+              </span>
             </div>
+            {weather ? <p className="mt-1.5 text-[10px] text-slate-400">风速 {Math.round(weather.windSpeed)} km/h · {weather.updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 更新</p> : null}
           </div>
         </div>
 

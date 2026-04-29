@@ -44,7 +44,7 @@ async function startFeedServer(feedXml: string) {
   };
 }
 
-test('reader routes expose overview, pull rss feeds and refresh openclaw inbox separately', async () => {
+test('reader routes expose overview and pull rss feeds only', async () => {
   const originalHome = process.env.HOME;
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'clawos-reader-test-'));
   const feedServer = await startFeedServer(createFeedXml('First Article'));
@@ -70,7 +70,7 @@ test('reader routes expose overview, pull rss feeds and refresh openclaw inbox s
     assert.equal(initialOverview.body.success, true);
     assert.equal(initialOverview.body.data.readerDir, readerDir);
     assert.equal(initialOverview.body.data.stats.totalFeeds >= 1, true);
-    assert.equal(initialOverview.body.data.inboxStatus.pending.count, 0);
+    assert.equal('inboxStatus' in initialOverview.body.data, false);
 
     const createFeedResponse = await request(app)
       .post('/api/system/reader/feeds')
@@ -85,72 +85,29 @@ test('reader routes expose overview, pull rss feeds and refresh openclaw inbox s
       'utf8'
     );
 
-    await fs.mkdir(path.join(readerDir, 'inbox', 'pending'), { recursive: true });
-    await fs.writeFile(
-      path.join(readerDir, 'inbox', 'pending', 'openclaw-brief.json'),
-      JSON.stringify({
-        version: '1.0',
-        source: 'openclaw',
-        generatedAt: '2026-04-01T07:55:00.000Z',
-        taskName: 'morning-brief',
-        items: [
-          {
-            title: 'OpenClaw collected AI market update',
-            url: 'https://example.com/openclaw-ai-market',
-            content: 'OpenClaw summary content for the morning AI market update.',
-            category: 'AI',
-            importance: 5,
-            summary: ['第一句', '第二句', '第三句'],
-            keywords: ['OpenClaw', 'AI', '市场'],
-            publishedAt: '2026-04-01T07:40:00.000Z'
-          }
-        ]
-      }, null, 2),
-      'utf8'
-    );
-
-    const overviewWithPending = await request(app).get('/api/system/reader/overview');
-    assert.equal(overviewWithPending.status, 200);
-    assert.equal(overviewWithPending.body.success, true);
-    assert.equal(overviewWithPending.body.data.inboxStatus.pending.count, 1);
-
     const pullResponse = await request(app).post('/api/system/reader/pull');
     assert.equal(pullResponse.status, 200);
     assert.equal(pullResponse.body.success, true);
-    assert.equal(pullResponse.body.data.processedInboxCount, 0);
     assert.equal(pullResponse.body.data.importedArticleCount >= 1, true);
-
-    const refreshResponse = await request(app).post('/api/system/reader/refresh');
-    assert.equal(refreshResponse.status, 200);
-    assert.equal(refreshResponse.body.success, true);
-    assert.equal(refreshResponse.body.data.processedInboxCount, 1);
-    assert.equal(refreshResponse.body.data.generatedBrief.total >= 1, true);
 
     const refreshedOverview = await request(app).get('/api/system/reader/overview');
     assert.equal(refreshedOverview.status, 200);
     assert.equal(refreshedOverview.body.success, true);
-    assert.equal(refreshedOverview.body.data.inboxStatus.pending.count, 0);
-    assert.equal(refreshedOverview.body.data.inboxStatus.processed.count, 1);
-
-    const processedFile = path.join(readerDir, 'inbox', 'processed', 'openclaw-brief.json');
-    const processedFileExists = await fs.access(processedFile).then(() => true).catch(() => false);
-    assert.equal(processedFileExists, true);
+    assert.equal('inboxStatus' in refreshedOverview.body.data, false);
 
     const articlesResponse = await request(app).get('/api/system/reader/articles?category=AI');
     assert.equal(articlesResponse.status, 200);
     assert.equal(articlesResponse.body.success, true);
     assert.equal(articlesResponse.body.data.length >= 1, true);
 
-    const openclawArticlesResponse = await request(app).get('/api/system/reader/articles?source=openclaw');
-    assert.equal(openclawArticlesResponse.status, 200);
-    assert.equal(openclawArticlesResponse.body.success, true);
-    assert.equal(openclawArticlesResponse.body.data.length, 1);
-    assert.equal(openclawArticlesResponse.body.data[0].sourceType, 'openclaw');
-
     const rssArticlesResponse = await request(app).get('/api/system/reader/articles?source=rss');
     assert.equal(rssArticlesResponse.status, 200);
     assert.equal(rssArticlesResponse.body.success, true);
     assert.equal(rssArticlesResponse.body.data.every((article: { sourceType: string }) => article.sourceType === 'rss'), true);
+
+    const openClawArticlesResponse = await request(app).get('/api/system/reader/articles?source=openclaw');
+    assert.equal(openClawArticlesResponse.status, 400);
+    assert.equal(openClawArticlesResponse.body.success, false);
 
     const articleId = articlesResponse.body.data[0].id as string;
     const saveResponse = await request(app).post(`/api/system/reader/articles/${articleId}/save`).send({ saved: true });

@@ -5,8 +5,6 @@ import type {
   ReaderArticle,
   ReaderDailyBrief,
   ReaderFeed,
-  ReaderInboxBucketStatus,
-  ReaderInboxPayload,
   ReaderSyncStatus,
 } from './types';
 import { READER_PRESET_FEEDS } from './presets';
@@ -15,7 +13,6 @@ const DEFAULT_STATUS: ReaderSyncStatus = {
   lastRunAt: null,
   lastSuccessAt: null,
   lastError: null,
-  processedInboxCount: 0,
   importedArticleCount: 0,
 };
 
@@ -68,9 +65,6 @@ async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
 
 export async function ensureReaderStructure(readerDir: string) {
   await Promise.all([
-    fs.mkdir(path.join(readerDir, 'inbox', 'pending'), { recursive: true }),
-    fs.mkdir(path.join(readerDir, 'inbox', 'processed'), { recursive: true }),
-    fs.mkdir(path.join(readerDir, 'inbox', 'failed'), { recursive: true }),
     fs.mkdir(path.join(readerDir, 'feeds'), { recursive: true }),
     fs.mkdir(path.join(readerDir, 'briefs'), { recursive: true }),
     fs.mkdir(path.join(readerDir, 'config'), { recursive: true }),
@@ -178,55 +172,12 @@ export async function readReadLater(readerDir: string): Promise<ReaderArticle[]>
   return items.sort((left, right) => new Date(right.savedAt || right.publishedAt).getTime() - new Date(left.savedAt || left.publishedAt).getTime());
 }
 
-export async function readPendingInboxFiles(readerDir: string): Promise<string[]> {
-  await ensureReaderStructure(readerDir);
-  const pendingDir = path.join(readerDir, 'inbox', 'pending');
-  const entries = await fs.readdir(pendingDir, { withFileTypes: true }).catch(() => []);
-
-  return entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => path.join(pendingDir, entry.name))
-    .sort();
-}
-
-export async function readInboxBucketStatus(
-  readerDir: string,
-  bucket: 'pending' | 'processed' | 'failed',
-  limit = 5,
-): Promise<ReaderInboxBucketStatus> {
-  await ensureReaderStructure(readerDir);
-  const bucketDir = path.join(readerDir, 'inbox', bucket);
-  const entries = await fs.readdir(bucketDir, { withFileTypes: true }).catch(() => []);
-  const fileNames = entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => entry.name)
-    .sort((left, right) => right.localeCompare(left));
-
-  return {
-    count: fileNames.length,
-    files: fileNames.slice(0, limit),
-  };
-}
-
-export async function readInboxPayload(filePath: string): Promise<ReaderInboxPayload> {
-  const content = await fs.readFile(filePath, 'utf8');
-  return JSON.parse(content) as ReaderInboxPayload;
-}
-
-export async function moveInboxFile(readerDir: string, filePath: string, bucket: 'processed' | 'failed') {
-  const targetPath = path.join(readerDir, 'inbox', bucket, path.basename(filePath));
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await fs.rename(filePath, targetPath);
-}
-
 export async function clearReaderRuntimeData(readerDir: string) {
   await Promise.all([
     fs.rm(path.join(readerDir, 'feeds'), { recursive: true, force: true }),
     fs.rm(path.join(readerDir, 'briefs'), { recursive: true, force: true }),
     fs.rm(path.join(readerDir, 'read-later'), { recursive: true, force: true }),
     fs.rm(path.join(readerDir, 'cache'), { recursive: true, force: true }),
-    fs.rm(path.join(readerDir, 'inbox', 'processed'), { recursive: true, force: true }),
-    fs.rm(path.join(readerDir, 'inbox', 'failed'), { recursive: true, force: true }),
   ]);
 
   await ensureReaderStructure(readerDir);

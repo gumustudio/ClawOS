@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 
-import type { ReaderArticle, ReaderCategory, ReaderFeed, ReaderInboxPayload } from './types';
+import type { ReaderArticle, ReaderCategory, ReaderFeed } from './types';
 
 function normalizeAuthor(author: unknown, fallback: string): string {
   if (typeof author === 'string') {
@@ -29,13 +29,6 @@ function normalizeText(content: string | undefined) {
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-function clampImportance(value: number | undefined): 1 | 2 | 3 | 4 | 5 {
-  if (!value || Number.isNaN(value)) {
-    return 3;
-  }
-  return Math.min(5, Math.max(1, Math.round(value))) as 1 | 2 | 3 | 4 | 5;
 }
 
 function inferCategory(title: string, content: string, fallback: ReaderCategory = '未分类'): ReaderCategory {
@@ -141,40 +134,4 @@ export function normalizeRssArticle(feed: ReaderFeed, item: {
     aiSummary: null,
     aiSummarizedAt: null,
   };
-}
-
-export function normalizeInboxPayload(payload: ReaderInboxPayload, originPath: string): ReaderArticle[] {
-  return payload.items.map((item, index) => {
-    const title = item.title.trim();
-    const contentText = normalizeText(item.content);
-    const category = item.category || inferCategory(title, contentText);
-    const dedupeKey = createDedupeKey(title, item.url);
-
-    return {
-      id: item.id?.trim() || createArticleId(`${payload.generatedAt}|${index}|${dedupeKey}`),
-      feedId: null,
-      sourceType: 'openclaw',
-      title,
-      url: item.url,
-      author: normalizeAuthor(item.author, 'OpenClaw'),
-      publishedAt: item.publishedAt || payload.generatedAt,
-      fetchedAt: new Date().toISOString(),
-      category,
-      importance: clampImportance(item.importance) || inferImportance(title, contentText),
-      summary: item.summary?.slice(0, 3).filter(Boolean) || buildSummary(title, contentText),
-      keywords: item.keywords?.slice(0, 5).filter(Boolean) || buildKeywords(title, contentText, category),
-      contentText,
-      contentHtml: item.content || '',
-      imageUrl: item.imageUrl || '',
-      readTime: Math.max(1, Math.ceil(contentText.length / 280)),
-      isRead: false,
-      savedAt: null,
-      dedupeKey,
-      originPath,
-      translatedText: null,
-      translatedAt: null,
-      aiSummary: null,
-      aiSummarizedAt: null,
-    };
-  });
 }

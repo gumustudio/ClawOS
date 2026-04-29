@@ -15,7 +15,7 @@ export interface ReaderFeed {
 export interface ReaderArticle {
   id: string
   feedId: string | null
-  sourceType: 'rss' | 'openclaw'
+  sourceType: 'rss'
   title: string
   url: string
   author: string
@@ -75,15 +75,9 @@ export interface ReaderOverview {
     lastRunAt: string | null
     lastSuccessAt: string | null
     lastError: string | null
-    processedInboxCount: number
     importedArticleCount: number
-  }
-  inboxStatus: {
-    pending: { count: number; files: string[] }
-    processed: { count: number; files: string[] }
-    failed: { count: number; files: string[] }
   }
   readerDir: string
 }
 
-export type ReaderView = 'brief' | 'category' | 'openclaw' | 'feeds' | 'saved'
+export type ReaderView = 'brief' | 'category' | 'feeds' | 'saved'
